@@ -5,7 +5,7 @@ So far this is just a tool to show media metadata.
 It is intended to help speed up mass digital archiving of CDs/Floppys/HDDs/ect...
 
 
-## Functionality;
+## Functionality:
   - List devices in table
   - Choose one/multiple devices to view
   - View a live feed of readable data recieved from device

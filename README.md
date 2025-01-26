@@ -6,7 +6,7 @@ It is intended to help speed up mass digital archiving of CDs/Floppys/HDDs/ect..
 
 
 ## Functionality;
-  - List Devices in Table
+  - List devices in table
   - Choose one/multiple devices to view
   - View a live feed of readable data recieved from device
 

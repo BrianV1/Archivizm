@@ -8,42 +8,84 @@ from rich.live import Live
 import questionary
 import threading
 import spacy
-import numpy
-#python -m spacy download en_core_web_lg
+import pandas as pd
+import json
 
+CONFIG_FILE = "config.json"
 
 class DeviceMonitor:
     def __init__(self):
         self.console = Console()
         self.live_thread = None
         self.running = False  # Controls the live update loop
+        self.working_directory = self.load_working_directory()
+        self.nlp = spacy.load("en_core_web_lg")
+        self.start_live()
 
-    def get_access(self, device):
+    # --- Working Directory Methods ---
+    def load_working_directory(self):
+        """Loads the stored working directory from config.json or returns None if not set."""
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r") as f:
+                    config = json.load(f)
+                    return config.get("working_directory")
+            except Exception as e:
+                self.console.print(f"Error loading config: {e}")
+        return None
+
+    def save_working_directory(self, directory):
+        """Saves the working directory to config.json."""
         try:
-            if psutil.disk_usage(device).total > 0:
-                return True
-        except (PermissionError, FileNotFoundError, OSError):
-            return False
-        return False
+            with open(CONFIG_FILE, "w") as f:
+                json.dump({"working_directory": directory}, f)
+        except Exception as e:
+            self.console.print(f"Error saving config: {e}")
 
+    def set_working_directory(self):
+        """Prompts the user to set a working directory for spreadsheet exports."""
+        directory = questionary.text("Enter the path to the working spreadsheet directory:").ask()
+        if os.path.isdir(directory):
+            self.working_directory = directory
+            self.save_working_directory(directory)
+            self.console.print(f"Working directory set to: {directory}")
+        else:
+            self.console.print("Invalid directory. Please enter a valid folder path.")
+
+    def select_spreadsheet(self):
+        """Allows the user to select a spreadsheet file from the working directory."""
+        if not self.working_directory:
+            self.set_working_directory()
+            if not self.working_directory:
+                return None
+        files = [f for f in os.listdir(self.working_directory) if f.endswith(('.csv', '.xls', '.xlsx'))]
+        if not files:
+            self.console.print("No CSV or Excel files found in the working directory.")
+            return None
+        file_choice = questionary.select("Choose a spreadsheet file:", choices=files).ask()
+        return os.path.join(self.working_directory, file_choice)
+
+    # --- Live Update Methods ---
     def device_list(self):
         """Builds and returns a rich Table of all disk partitions."""
         partitions = psutil.disk_partitions()
         table = Table(title="Device List")
-        # Define columns with some color styling
         table.add_column("Device", style="cyan")
         table.add_column("Type", style="magenta")
         table.add_column("Filesystem", style="green")
         table.add_column("Size", style="yellow")
-        # Add a row per partition
         for partition in partitions:
             if self.get_access(partition.device):
-                usage = psutil.disk_usage(partition.device)
+                try:
+                    usage = psutil.disk_usage(partition.device)
+                    size = bytes2human(usage.total)
+                except Exception:
+                    size = "N/A"
                 table.add_row(
                     partition.device,
                     partition.opts,
                     partition.fstype,
-                    bytes2human(usage.total)
+                    size
                 )
             else:
                 table.add_row(partition.device, "N/A", "N/A", "N/A")
@@ -67,6 +109,244 @@ class DeviceMonitor:
         self.running = False
         if self.live_thread is not None:
             self.live_thread.join()
+
+    # --- Device Info Helper ---
+    def collect_device_info(self, device):
+        """
+        Collects all device information into a dictionary.
+        This includes partition details, disk usage, filesystem statistics,
+        I/O counters, content overview, and file type information with file count
+        and per-extension breakdown as separate elements.
+        """
+        device_info = {}
+        partitions = psutil.disk_partitions()
+        for partition in partitions:
+            if partition.device == device:
+                # Basic Partition Information
+                device_info["Mountpoint"] = partition.mountpoint
+                device_info["Filesystem Type"] = partition.fstype
+                device_info["Mount Options"] = partition.opts
+                device_type = self.guess_device_type(partition)
+                device_info["Device Type"] = device_type
+
+                # Set Access Restrictions based on device type
+                if device_type == "CD/DVD":
+                    device_info["Access Restrictions"] = "DVD Reader"
+                elif device_type == "Floppy":
+                    device_info["Access Restrictions"] = "Floppy Drive"
+                elif device_type == "Zip Disk":
+                    device_info["Access Restrictions"] = "Zip Drive"
+
+                # Disk Usage Information
+                try:
+                    usage = psutil.disk_usage(partition.mountpoint)
+                    device_info["Total Size"] = bytes2human(usage.total)
+                    device_info["Used Size"] = bytes2human(usage.used)
+                    device_info["Free Size"] = bytes2human(usage.free)
+                    device_info["Usage Percent"] = f"{usage.percent}%"
+                except Exception:
+                    device_info["Disk Usage"] = "Not available"
+
+                # Filesystem Statistics using os.statvfs
+                try:
+                    statvfs = os.statvfs(partition.mountpoint)
+                    fs_stats = {
+                        "Block Size": f"{statvfs.f_frsize} bytes",
+                        "Total Blocks": statvfs.f_blocks,
+                        "Free Blocks": statvfs.f_bfree,
+                        "Available Blocks": statvfs.f_bavail,
+                        "Inodes Total": statvfs.f_files,
+                        "Inodes Free": statvfs.f_ffree,
+                        "Inodes Available": statvfs.f_favail
+                    }
+                    device_info["Filesystem Statistics"] = fs_stats
+                except Exception as e:
+                    device_info["Filesystem Statistics"] = "Not available"
+
+                # Disk I/O Counters
+                io_counters = psutil.disk_io_counters(perdisk=True)
+                device_key = partition.device.replace("/dev/", "")
+                if device_key in io_counters:
+                    counters = io_counters[device_key]
+                    device_info["Disk I/O Counters"] = {
+                        "Read Count": counters.read_count,
+                        "Read Bytes": bytes2human(counters.read_bytes),
+                        "Read Time": f"{counters.read_time} ms"
+                    }
+                else:
+                    device_info["Disk I/O Counters"] = "Not available"
+
+                # Top-Level Content Overview
+                try:
+                    items = os.listdir(partition.mountpoint)
+                    num_files_overview = sum(1 for item in items if os.path.isfile(os.path.join(partition.mountpoint, item)))
+                    dir_count = sum(1 for item in items if os.path.isdir(os.path.join(partition.mountpoint, item)))
+                    device_info["Top-Level Content Overview"] = {
+                        "Files": num_files_overview,
+                        "Directories": dir_count
+                    }
+                except Exception as e:
+                    device_info["Top-Level Content Overview"] = "Not available"
+
+                # File Types Breakdown: separate Number of Files and Breakdown
+                file_types = {}
+                max_files = 20000
+                count = 0
+                try:
+                    for root, dirs, files in os.walk(partition.mountpoint):
+                        for file in files:
+                            count += 1
+                            ext = os.path.splitext(file)[1].lower() or "No Extension"
+                            file_types[ext] = file_types.get(ext, 0) + 1
+                            if count >= max_files:
+                                break
+                        if count >= max_files:
+                            break
+
+                    device_info["Number of Files"] = count
+                    device_info["File Types"] = file_types
+
+                except Exception as e:
+                    device_info["Number of Files"] = "Not available"
+                    device_info["File Types"] = "Not available"
+
+                return device_info
+        return None
+
+    # --- Device View and Export ---
+    def device_view(self, device):
+        """Prints detailed information about the specified device using the collected device info."""
+        info = self.collect_device_info(device)
+        if not info:
+            self.console.print(f"[bold red]Device {device} not found.[/bold red]")
+            return
+
+        self.console.rule(f"[bold red]Device Details: {device}")
+        self.console.print(f"[bold cyan]Mountpoint:[/bold cyan] {info.get('Mountpoint', 'N/A')}")
+        self.console.print(f"[bold magenta]Filesystem Type:[/bold magenta] {info.get('Filesystem Type', 'N/A')}")
+        self.console.print(f"[bold magenta]Mount Options:[/bold magenta] {info.get('Mount Options', 'N/A')}")
+        self.console.print(f"[bold blue]Device Type:[/bold blue] {info.get('Device Type', 'N/A')}")
+        if "Access Restrictions" in info:
+            self.console.print(f"[bold red]Access Restrictions:[/bold red] {info.get('Access Restrictions')}")
+        # Disk Usage
+        if "Total Size" in info:
+            self.console.print(f"[bold yellow]Disk Usage:[/bold yellow]")
+            self.console.print(f"  Total: {info.get('Total Size')}")
+            self.console.print(f"  Used:  {info.get('Used Size')}")
+            self.console.print(f"  Free:  {info.get('Free Size')}")
+            self.console.print(f"  Usage: {info.get('Usage Percent')}")
+        else:
+            self.console.print(f"[bold yellow]Disk Usage:[/bold yellow] Not available")
+        # Filesystem Statistics
+        fs_stats = info.get("Filesystem Statistics")
+        if isinstance(fs_stats, dict):
+            self.console.print(f"[bold green]Filesystem Statistics:[/bold green]")
+            for key, value in fs_stats.items():
+                self.console.print(f"  {key}: {value}")
+        else:
+            self.console.print(f"[bold green]Filesystem Statistics:[/bold green] Not available")
+        # Disk I/O Counters
+        io_counters = info.get("Disk I/O Counters")
+        if isinstance(io_counters, dict):
+            self.console.print(f"[bold blue]Disk I/O Counters:[/bold blue]")
+            for key, value in io_counters.items():
+                self.console.print(f"  {key}: {value}")
+        else:
+            self.console.print(f"[bold blue]Disk I/O Counters:[/bold blue] Not available")
+        # Top-Level Content Overview
+        content_overview = info.get("Top-Level Content Overview")
+        if isinstance(content_overview, dict):
+            self.console.print(f"[bold purple]Top-Level Content Overview:[/bold purple]")
+            self.console.print(f"  Files: {content_overview.get('Files')}, Directories: {content_overview.get('Directories')}")
+        else:
+            self.console.print(f"[bold purple]Top-Level Content Overview:[/bold purple] Not available")
+
+        num_files = info.get("Number of Files")
+        file_types = info.get("File Types")
+        if num_files is not None and isinstance(file_types, dict):
+            self.console.print(f"[bold purple]File Types Breakdown:[/bold purple]")
+            self.console.print(f"Files Scanned: {num_files}")
+            from rich.table import Table
+            ft_table = Table(show_header=True, header_style="bold magenta")
+            ft_table.add_column("File Extension", style="cyan")
+            ft_table.add_column("Count", style="green")
+            for ext, cnt in sorted(file_types.items(), key=lambda x: x[1], reverse=True):
+                ft_table.add_row(ext, str(cnt))
+            self.console.print(ft_table)
+        else:
+            self.console.print("[bold purple]File Types Breakdown:[/bold purple] Not available")
+        self.console.rule()
+
+    def export(self, device):
+        """Exports device information to a selected spreadsheet file."""
+        info = self.collect_device_info(device)
+        if not info:
+            self.console.print(f"[bold red]Device {device} not found.[/bold red]")
+            return
+
+        # Select spreadsheet file from working directory
+        file_path = self.select_spreadsheet()
+        if not file_path:
+            return
+
+        file_ext = os.path.splitext(file_path)[1].lower()
+        try:
+            if file_ext == '.csv':
+                df = pd.read_csv(file_path)
+            else:
+                df = pd.read_excel(file_path)
+        except Exception as e:
+            self.console.print(f"Error reading file: {e}")
+            return
+
+        column_names = list(df.columns)
+
+        # Prompt the user to choose which device info elements to export
+        selected_keys = questionary.checkbox(
+            "Select elements to export:",
+            choices=list(info.keys())
+        ).ask()
+        self.stop_live()
+
+        export_data = {}
+        matched_scores = {}
+        for key in selected_keys:
+            value = info[key]
+            key_doc = self.nlp(key)
+            best_match = None
+            best_score = 0
+            for col in column_names:
+                col_doc = self.nlp(str(col))
+                score = key_doc.similarity(col_doc)
+                print(f"Key: {repr(key)}, Column: {repr(col)}, Score: {repr(score)}")
+                time.sleep(0.1)
+                if score > best_score:
+                    best_score = score
+                    best_match = col
+                    matched_scores[col] = score
+            if best_match and best_score >= matched_scores[best_match]:
+                export_data[best_match] = value
+
+        # Build a new row with all spreadsheet columns (unmatched columns get a value of None)
+        new_row = {col: export_data.get(col, None) for col in column_names}
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+        try:
+            if file_ext == '.csv':
+                df.to_csv(file_path, index=False)
+            else:
+                df.to_excel(file_path, index=False)
+            self.console.print(f"Export successful to {file_path}")
+        except Exception as e:
+            self.console.print(f"Error writing to file: {e}")
+
+    def get_access(self, device):
+        try:
+            if psutil.disk_usage(device).total > 0:
+                return True
+        except (PermissionError, FileNotFoundError, OSError):
+            return False
+        return False
 
     def choose_device(self):
         """Prompts the user to choose one or more devices from the list."""
@@ -93,174 +373,19 @@ class DeviceMonitor:
         else:
             return "Regular Storage"
 
-
-    def device_view(self, device):
-        """Prints detailed information about the specified device in an organized manner,
-        including an expanded content overview that lists file types found on the device."""
-        partitions = psutil.disk_partitions()
-        found = False
-
-        for partition in partitions:
-            if partition.device == device:
-                found = True
-                # Try to obtain disk usage from the mountpoint.
-                try:
-                    usage = psutil.disk_usage(partition.mountpoint)
-                except Exception:
-                    usage = None
-
-                self.console.rule(f"[bold red]Device Details: {partition.device}")
-
-                # Basic Partition Information
-                self.console.print(f"[bold cyan]Mountpoint:[/bold cyan] {partition.mountpoint}")
-                self.console.print(f"[bold magenta]Filesystem Type:[/bold magenta] {partition.fstype}")
-                self.console.print(f"[bold magenta]Mount Options:[/bold magenta] {partition.opts}")
-
-                # Device Type Guess
-                device_type = self.guess_device_type(partition)
-                self.console.print(f"[bold blue]Device Type:[/bold blue] {device_type}")
-
-                # Disk Usage Information
-                if usage:
-                    self.console.print(f"[bold yellow]Disk Usage:[/bold yellow]")
-                    self.console.print(f"  Total: {bytes2human(usage.total)}")
-                    self.console.print(f"  Used:  {bytes2human(usage.used)} ({usage.percent}%)")
-                    self.console.print(f"  Free:  {bytes2human(usage.free)}")
-                else:
-                    self.console.print(f"[bold yellow]Disk Usage:[/bold yellow] Not available")
-
-                # Filesystem Statistics using os.statvfs
-                try:
-                    statvfs = os.statvfs(partition.mountpoint)
-                    self.console.print(f"[bold green]Filesystem Statistics:[/bold green]")
-                    self.console.print(f"  Block Size: {statvfs.f_frsize} bytes")
-                    self.console.print(f"  Total Blocks: {statvfs.f_blocks}")
-                    self.console.print(f"  Free Blocks: {statvfs.f_bfree}")
-                    self.console.print(f"  Available Blocks: {statvfs.f_bavail}")
-                    self.console.print(
-                        f"  Inodes - Total: {statvfs.f_files}, Free: {statvfs.f_ffree}, Available: {statvfs.f_favail}"
-                    )
-                except Exception as e:
-                    self.console.print(f"[bold green]Filesystem Statistics:[/bold green] Not available")
-
-                # Disk I/O Counters (if available)
-                io_counters = psutil.disk_io_counters(perdisk=True)
-                device_key = partition.device.replace("/dev/", "")
-                if device_key in io_counters:
-                    counters = io_counters[device_key]
-                    self.console.print(f"[bold blue]Disk I/O Counters:[/bold blue]")
-                    self.console.print(f"  Read Count:  {counters.read_count}")
-                    #self.console.print(f"  Write Count: {counters.write_count}")
-                    self.console.print(f"  Read Bytes:  {bytes2human(counters.read_bytes)}")
-                    #self.console.print(f"  Write Bytes: {bytes2human(counters.write_bytes)}")
-                    self.console.print(f"  Read Time:   {counters.read_time} ms")
-                    #self.console.print(f"  Write Time:  {counters.write_time} ms")
-                else:
-                    self.console.print(f"[bold blue]Disk I/O Counters:[/bold blue] Not available for this device.")
-
-                # Expanded Content Overview
-                try:
-                    # Top-level content overview (only list immediate children)
-                    items = os.listdir(partition.mountpoint)
-                    file_count = sum(
-                        1 for item in items if os.path.isfile(os.path.join(partition.mountpoint, item))
-                    )
-                    dir_count = sum(
-                        1 for item in items if os.path.isdir(os.path.join(partition.mountpoint, item))
-                    )
-                    self.console.print(f"[bold purple]Top-Level Content Overview:[/bold purple]")
-                    self.console.print(f"  Files: {file_count} | Directories: {dir_count}")
-
-                    # File Types Breakdown: Walk the file tree (up to a sample limit)
-                    file_types = {}
-                    max_files = 20000  # limit the scan for performance reasons
-                    count = 0
-                    for root, dirs, files in os.walk(partition.mountpoint):
-                        for file in files:
-                            count += 1
-                            ext = os.path.splitext(file)[1].lower() or "No Extension"
-                            file_types[ext] = file_types.get(ext, 0) + 1
-                            if count >= max_files:
-                                break
-                        if count >= max_files:
-                            break
-
-                    if file_types:
-                        self.console.print(f"[bold purple]File Types Breakdown (out of {count} files):[/bold purple]")
-                        # Create a table to display the file type counts.
-                        from rich.table import Table
-                        ft_table = Table(show_header=True, header_style="bold magenta")
-                        ft_table.add_column("File Extension", style="cyan")
-                        ft_table.add_column("Count", style="green")
-                        for ext, cnt in sorted(file_types.items(), key=lambda x: x[1], reverse=True):
-                            ft_table.add_row(ext, str(cnt))
-                        self.console.print(ft_table)
-                    else:
-                        self.console.print(f"[bold purple]File Types Breakdown:[/bold purple] Not available")
-                except Exception as e:
-                    self.console.print(f"[bold purple]Content Overview:[/bold purple] Not available ({e})")
-
-                self.console.rule()
-                break
-
-        if not found:
-            self.console.print(f"[bold red]Device {device} not found.[/bold red]")
-
-    def export(self, device):
-        # Todo, use spaCY to find similarity between device specs and Spreadsheet column headers
-        # Create a dictionary of device info names matched with specs
-        #
-        # Use this for reference:
-        # nlp=spacy.load("en_core_web_lg")
-        # sentence1 = "I love pizza"
-        # sentence2 = "I adore hamburgers"
-        # doc1 = nlp(sentence1)
-        # doc2 = nlp(sentence2)
-        # similarity_score =doc1.similarity(doc2)
-
-        column_names = #import this from spreadhseet file
-
-        device_info = {}
-        partitions = psutil.disk_partitions()
-        for partition in partitions:
-            if partition.device == device:
-                try:
-                    usage = psutil.disk_usage(partition.mountpoint)
-                except Exception:
-                    usage = None
-
-                device_info["Mountpoint"] = partition.mountpoint
-                device_info["Filesystem Type"] = partition.fstype
-                device_info["Mount Options"] = partition.opts
-                device_info["Device Type"] = self.guess_device_type(partition)
-
-                if usage:
-                    device_info["Total Size"] = bytes2human(usage.total)
-                    device_info["Used Space"] = bytes2human(usage.used)
-                    device_info["Free Space"] = bytes2human(usage.free)
-                # You can add more device-specific information here if needed.
-                break
-
-
-
-
     def run(self):
         """
         Main loop:
           - Starts the live table for a few seconds,
           - Stops it to let the user interact with a menu,
-          - If a device is chosen, displays its details,
+          - If a device is chosen, displays its details or exports its data,
           - Then restarts the live view.
         """
         while True:
-            # Start the live table display in a background thread.
-            self.start_live()
-            # Present the user with a menu.
             action = questionary.select(
                 "Choose an action:",
-                choices=["View Device", "Export to Spreadsheet", "Exit"]
+                choices=["View Device", "Export to Spreadsheet", "Set Working Directory", "Exit"]
             ).ask()
-            #Stop live once user input
             self.stop_live()
 
             if action == "View Device":
@@ -268,18 +393,18 @@ class DeviceMonitor:
                 if selected_devices:
                     for device in selected_devices:
                         self.device_view(device)
-                    # Wait for user acknowledgement before resuming live display.
                     questionary.text("Press Enter to continue...").ask()
             elif action == "Export to Spreadsheet":
                 selected_devices = self.choose_device()
                 if selected_devices:
                     for device in selected_devices:
                         self.export(device)
+            elif action == "Set Working Directory":
+                self.set_working_directory()
             elif action == "Exit":
                 break
 
 if __name__ == "__main__":
-    # Print the fancy header
     print("""
   ▒▓██████▓▒  ▒▓███████▓▒   ▒▓██████▓▒  ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒ ▒▓████████▓▒ ▒▓██████████████▓▒
  ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒        ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒  ▒▓█▓▒
@@ -291,3 +416,5 @@ if __name__ == "__main__":
     """)
     monitor = DeviceMonitor()
     monitor.run()
+
+

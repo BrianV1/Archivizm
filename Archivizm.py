@@ -5,6 +5,9 @@ from psutil._common import bytes2human
 from rich.console import Console
 from rich.table import Table
 from rich.live import Live
+from alive_progress import alive_bar
+import hashlib
+import concurrent.futures
 import questionary
 import threading
 import spacy
@@ -373,6 +376,107 @@ class DeviceMonitor:
         else:
             return "Regular Storage"
 
+    class DupeCheck:
+        def __init__(self, directory):
+            self.directory = directory
+
+        def md5(self, file_path):
+            """Calculate the MD5 hash of a file."""
+            try:
+                with open(file_path, 'rb') as f:
+                    file_hash = hashlib.md5()
+                    while chunk := f.read(8192):  # Read the file in chunks of 8k
+                        file_hash.update(chunk)
+                return file_hash.hexdigest(), file_path
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}")
+                return None, file_path
+
+        def find_duplicates(self):
+            hashes = {}
+            duplicates = {}
+
+            # Walk through the directory to get all files
+            file_paths = []
+
+            with alive_bar(title="Scanning Files") as bar:
+                for root, _, files in os.walk(self.directory):
+                    for file in files:
+                        file_paths.append(os.path.join(root, file))
+                        bar()  # Update the progress bar for each file found
+
+            print(f"Total files to process: {len(file_paths)}")  # Debugging message to check if files are found
+
+            # Using ThreadPoolExecutor to process files in parallel
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                # Map the MD5 calculation to each file path in parallel
+                future_to_file = {executor.submit(self.md5, file_path): file_path for file_path in file_paths}
+
+                # Initialize the progress bar with the number of files to process
+                with alive_bar(len(future_to_file), title="Processing Files") as bar:
+                    # Ensure the progress bar is updated for each completed task
+                    for future in concurrent.futures.as_completed(future_to_file):
+                        #print("Task completed")  # Debugging message to show task completion
+                        file_hash, file_path = future.result()
+
+
+                        # Update the progress bar after processing each file
+                        bar()
+
+                        # If a valid hash is returned, check for duplicates
+                        if file_hash:
+                            if file_hash in hashes:
+                                duplicates[file_hash] = [file_path] + duplicates.get(file_hash, [])
+                            else:
+                                hashes[file_hash] = file_path
+            for file_hash in duplicates:
+                duplicates[file_hash].append(hashes[file_hash])
+
+            return duplicates
+
+    def dupe_finder(self):
+        # Get all disk partitions
+        partitions = psutil.disk_partitions()
+
+        # List available partitions for the user to select
+        device_choices = [partition.device for partition in partitions]
+
+        # Prompt user to select one or more devices
+        device_paths = questionary.checkbox("Select device(s) to view:", choices=device_choices).ask()
+
+        def chooseDir(directory):
+            return questionary.select("Select directory to search", choices=os.listdir(directory)).ask()
+
+        # Ensure the selected devices exist and walk through the directories
+        for device_path in device_paths:
+            # Find the mount point for each device
+            for partition in partitions:
+                print(partition.mountpoint)
+                if partition.device == device_path:
+                    directory = partition.mountpoint
+                    if os.path.exists(directory):
+                        try:
+                            searching = True
+                            while searching:
+                                print(f"Directory: {directory}")
+                                answer = input("Go to subdirectory (yes/no): ").lower()
+                                if answer in ["yes", "no"]:
+                                    if answer == "yes":
+                                        directory = directory + "/" + chooseDir(directory)
+                                    else:
+                                        searching = False
+                                else:
+                                    print("Please answer 'yes' or 'no'.")
+                            print(f"Exploring {directory}...")
+                            dupeFinder = self.DupeCheck(directory)
+                            duplicates = dupeFinder.find_duplicates()
+                        except PermissionError:
+                            print("PermissionError")
+                    else:
+                        print(f"{mount_point} does not exist or is not mounted.")
+        for hash in duplicates:
+            print(duplicates[hash])
+
     def run(self):
         """
         Main loop:
@@ -384,7 +488,7 @@ class DeviceMonitor:
         while True:
             action = questionary.select(
                 "Choose an action:",
-                choices=["View Device", "Export to Spreadsheet", "Set Working Directory", "Exit"]
+                choices=["View Device", "Export to Spreadsheet", "Set Working Directory", "Find Duplicates", "Exit"]
             ).ask()
             self.stop_live()
 
@@ -401,6 +505,8 @@ class DeviceMonitor:
                         self.export(device)
             elif action == "Set Working Directory":
                 self.set_working_directory()
+            elif action == "Find Duplicates":
+                self.dupe_finder()
             elif action == "Exit":
                 break
 

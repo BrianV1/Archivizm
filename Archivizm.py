@@ -80,7 +80,7 @@ class DeviceMonitor:
         for partition in partitions:
             if self.get_access(partition.device):
                 try:
-                    usage = psutil.disk_usage(partition.device)
+                    usage = psutil.disk_usage(partition.mountpoint)
                     size = bytes2human(usage.total)
                 except Exception:
                     size = "N/A"

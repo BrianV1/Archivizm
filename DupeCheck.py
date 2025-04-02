@@ -34,9 +34,12 @@ def find_duplicates(directory):
 
     # Walk through the directory to get all files
     file_paths = []
-    for root, _, files in os.walk(directory):
-        for file in files:
-            file_paths.append(os.path.join(root, file))
+    
+    with alive_bar(title="Scanning Files") as bar:
+        for root, _, files in os.walk(directory):
+            for file in files:
+                file_paths.append(os.path.join(root, file))
+                bar()  # Update the progress bar for each file found
 
     print(f"Total files to process: {len(file_paths)}")  # Debugging message to check if files are found
 
@@ -49,7 +52,7 @@ def find_duplicates(directory):
         with alive_bar(len(future_to_file), title="Processing Files") as bar:
             # Ensure the progress bar is updated for each completed task
             for future in concurrent.futures.as_completed(future_to_file):
-                print("Task completed")  # Debugging message to show task completion
+                #print("Task completed")  # Debugging message to show task completion
                 file_hash, file_path = future.result()
 
 

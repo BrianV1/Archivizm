@@ -1,138 +1,45 @@
 import os
-import time
+import sys
+import json
 import psutil
 from psutil._common import bytes2human
-from rich.console import Console
-from rich.table import Table
-from rich.live import Live
-from alive_progress import alive_bar
 import hashlib
 import concurrent.futures
-import questionary
-import threading
-import spacy
 import pandas as pd
-import json
+import spacy
+from PyQt5.QtCore import QTimer, QThread, pyqtSignal
+from PyQt5.QtGui import QFont
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
+    QLabel, QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit, QFileDialog,
+    QComboBox, QProgressBar, QLineEdit, QDialog, QCheckBox, QDialogButtonBox,
+    QHeaderView, QMessageBox, QSizePolicy
+)
+import subprocess
+import tempfile
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+
+# Set default font size for the application
+DEFAULT_FONT_SIZE = 10
 
 CONFIG_FILE = "config.json"
 
-class DeviceMonitor:
-    def __init__(self):
-        self.console = Console()
-        self.live_thread = None
-        self.running = False  # Controls the live update loop
-        self.working_directory = self.load_working_directory()
-        self.nlp = spacy.load("en_core_web_lg")
-        self.start_live()
-
-    # --- Working Directory Methods ---
-    def load_working_directory(self):
-        """Loads the stored working directory from config.json or returns None if not set."""
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, "r") as f:
-                    config = json.load(f)
-                    return config.get("working_directory")
-            except Exception as e:
-                self.console.print(f"Error loading config: {e}")
-        return None
-
-    def save_working_directory(self, directory):
-        """Saves the working directory to config.json."""
-        try:
-            with open(CONFIG_FILE, "w") as f:
-                json.dump({"working_directory": directory}, f)
-        except Exception as e:
-            self.console.print(f"Error saving config: {e}")
-
-    def set_working_directory(self):
-        """Prompts the user to set a working directory for spreadsheet exports."""
-        directory = questionary.text("Enter the path to the working spreadsheet directory:").ask()
-        if os.path.isdir(directory):
-            self.working_directory = directory
-            self.save_working_directory(directory)
-            self.console.print(f"Working directory set to: {directory}")
-        else:
-            self.console.print("Invalid directory. Please enter a valid folder path.")
-
-    def select_spreadsheet(self):
-        """Allows the user to select a spreadsheet file from the working directory."""
-        if not self.working_directory:
-            self.set_working_directory()
-            if not self.working_directory:
-                return None
-        files = [f for f in os.listdir(self.working_directory) if f.endswith(('.csv', '.xls', '.xlsx'))]
-        if not files:
-            self.console.print("No CSV or Excel files found in the working directory.")
-            return None
-        file_choice = questionary.select("Choose a spreadsheet file:", choices=files).ask()
-        return os.path.join(self.working_directory, file_choice)
-
-    # --- Live Update Methods ---
-    def device_list(self):
-        """Builds and returns a rich Table of all disk partitions."""
-        partitions = psutil.disk_partitions()
-        table = Table(title="Device List")
-        table.add_column("Device", style="cyan")
-        table.add_column("Type", style="magenta")
-        table.add_column("Filesystem", style="green")
-        table.add_column("Size", style="yellow")
-        for partition in partitions:
-            if self.get_access(partition.device):
-                try:
-                    usage = psutil.disk_usage(partition.mountpoint)
-                    size = bytes2human(usage.total)
-                except Exception:
-                    size = "N/A"
-                table.add_row(
-                    partition.device,
-                    partition.opts,
-                    partition.fstype,
-                    size
-                )
-            else:
-                table.add_row(partition.device, "N/A", "N/A", "N/A")
-        return table
-
-    def update_live(self):
-        """Updates the live table continuously until self.running is set to False."""
-        with Live(self.device_list(), console=self.console, refresh_per_second=4) as live:
-            while self.running:
-                live.update(self.device_list())
-                time.sleep(0.4)
-
-    def start_live(self):
-        """Starts the live update thread."""
-        self.running = True
-        self.live_thread = threading.Thread(target=self.update_live, daemon=True)
-        self.live_thread.start()
-
-    def stop_live(self):
-        """Stops the live update thread and waits for it to finish."""
-        self.running = False
-        if self.live_thread is not None:
-            self.live_thread.join()
-
-    # --- Device Info Helper ---
-    def collect_device_info(self, device):
-        """
-        Collects all device information into a dictionary.
-        This includes partition details, disk usage, filesystem statistics,
-        I/O counters, content overview, and file type information with file count
-        and per-extension breakdown as separate elements.
-        """
+# Utility class to collect device information
+class DeviceInfoCollector:
+    @staticmethod
+    def collect_device_info(device, use_siegfried=True, directory=None):
         device_info = {}
         partitions = psutil.disk_partitions()
         for partition in partitions:
             if partition.device == device:
-                # Basic Partition Information
                 device_info["Mountpoint"] = partition.mountpoint
                 device_info["Filesystem Type"] = partition.fstype
                 device_info["Mount Options"] = partition.opts
-                device_type = self.guess_device_type(partition)
+                device_type = DeviceInfoCollector.guess_device_type(partition)
                 device_info["Device Type"] = device_type
 
-                # Set Access Restrictions based on device type
                 if device_type == "CD/DVD":
                     device_info["Access Restrictions"] = "DVD Reader"
                 elif device_type == "Floppy":
@@ -140,7 +47,6 @@ class DeviceMonitor:
                 elif device_type == "Zip Disk":
                     device_info["Access Restrictions"] = "Zip Drive"
 
-                # Disk Usage Information
                 try:
                     usage = psutil.disk_usage(partition.mountpoint)
                     device_info["Total Size"] = bytes2human(usage.total)
@@ -148,12 +54,11 @@ class DeviceMonitor:
                     device_info["Free Size"] = bytes2human(usage.free)
                     device_info["Usage Percent"] = f"{usage.percent}%"
                 except Exception:
-                    device_info["Disk Usage"] = "Not available"
+                    pass
 
-                # Filesystem Statistics using os.statvfs
                 try:
                     statvfs = os.statvfs(partition.mountpoint)
-                    fs_stats = {
+                    device_info["Filesystem Statistics"] = {
                         "Block Size": f"{statvfs.f_frsize} bytes",
                         "Total Blocks": statvfs.f_blocks,
                         "Free Blocks": statvfs.f_bfree,
@@ -162,11 +67,9 @@ class DeviceMonitor:
                         "Inodes Free": statvfs.f_ffree,
                         "Inodes Available": statvfs.f_favail
                     }
-                    device_info["Filesystem Statistics"] = fs_stats
-                except Exception as e:
-                    device_info["Filesystem Statistics"] = "Not available"
+                except Exception:
+                    pass
 
-                # Disk I/O Counters
                 io_counters = psutil.disk_io_counters(perdisk=True)
                 device_key = partition.device.replace("/dev/", "")
                 if device_key in io_counters:
@@ -176,351 +79,854 @@ class DeviceMonitor:
                         "Read Bytes": bytes2human(counters.read_bytes),
                         "Read Time": f"{counters.read_time} ms"
                     }
-                else:
-                    device_info["Disk I/O Counters"] = "Not available"
 
-                # Top-Level Content Overview
                 try:
-                    items = os.listdir(partition.mountpoint)
-                    num_files_overview = sum(1 for item in items if os.path.isfile(os.path.join(partition.mountpoint, item)))
-                    dir_count = sum(1 for item in items if os.path.isdir(os.path.join(partition.mountpoint, item)))
-                    device_info["Top-Level Content Overview"] = {
-                        "Files": num_files_overview,
-                        "Directories": dir_count
-                    }
-                except Exception as e:
-                    device_info["Top-Level Content Overview"] = "Not available"
+                    scan_path = directory if directory else partition.mountpoint
+                    items = os.listdir(scan_path)
+                    num_files = sum(1 for item in items if os.path.isfile(os.path.join(scan_path, item)))
+                    dir_count = sum(1 for item in items if os.path.isdir(os.path.join(scan_path, item)))
+                    device_info["Top-Level Content Overview"] = {"Files": num_files, "Directories": dir_count}
+                except Exception:
+                    pass
 
-                # File Types Breakdown: separate Number of Files and Breakdown
-                file_types = {}
-                max_files = 20000
-                count = 0
-                try:
-                    for root, dirs, files in os.walk(partition.mountpoint):
-                        for file in files:
-                            count += 1
-                            ext = os.path.splitext(file)[1].lower() or "No Extension"
-                            file_types[ext] = file_types.get(ext, 0) + 1
-                            if count >= max_files:
-                                break
-                        if count >= max_files:
-                            break
+                # File format identification
+                scan_path = directory if directory else partition.mountpoint
+                if scan_path and os.path.exists(scan_path):
+                    if use_siegfried:
+                        siegfried_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Siegfried', 'sf.exe')
+                        if not os.path.exists(siegfried_path):
+                            device_info["Siegfried Status"] = "Siegfried not found at expected location"
+                            return device_info
+                        
+                        try:
+                            # Collect up to 20000 file paths
+                            max_files = 20000
+                            count = 0
+                            file_paths = []
+                            for root, _, files in os.walk(scan_path):
+                                for file in files:
+                                    count += 1
+                                    full_path = os.path.join(root, file)
+                                    file_paths.append(full_path)
+                                    if count >= max_files:
+                                        break
+                                if count >= max_files:
+                                    break
 
-                    device_info["Number of Files"] = count
-                    device_info["File Types"] = file_types
+                            if file_paths:
+                                with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as temp:
+                                    temp.write('\n'.join(file_paths))
+                                temp_path = temp.name
 
-                except Exception as e:
-                    device_info["Number of Files"] = "Not available"
-                    device_info["File Types"] = "Not available"
-
+                                cmd = [siegfried_path, '-json', '-f', temp_path]
+                                result = subprocess.run(cmd, capture_output=True, text=True)
+                                if result.returncode != 0:
+                                    device_info["Siegfried Error"] = f"Command failed with return code {result.returncode}: {result.stderr}"
+                                    os.unlink(temp_path)
+                                    return device_info
+                                    
+                                json_data = json.loads(result.stdout)
+                                
+                                formats = {}
+                                scanned_files = len(json_data.get('files', []))
+                                for file_entry in json_data.get('files', []):
+                                    for match in file_entry.get('matches', []):
+                                        if match.get('ns') == 'pronom':
+                                            fmt = match.get('id')
+                                            formats[fmt] = formats.get(fmt, 0) + 1
+                                            break
+                                
+                                os.unlink(temp_path)
+                                
+                                if formats:
+                                    device_info["Scanned Files"] = scanned_files
+                                    device_info["File Formats"] = formats
+                        except Exception as e:
+                            device_info["Siegfried Exception"] = str(e)
+                    else:
+                        # Lightweight file type scanning
+                        try:
+                            file_types = {}
+                            count = 0
+                            max_files = 20000
+                            
+                            for root, _, files in os.walk(scan_path):
+                                for file in files:
+                                    count += 1
+                                    ext = os.path.splitext(file)[1].lower()
+                                    if ext == '':
+                                        ext = 'no_extension'
+                                    file_types[ext] = file_types.get(ext, 0) + 1
+                                    
+                                    if count >= max_files:
+                                        break
+                                if count >= max_files:
+                                    break
+                            
+                            device_info["Scanned Files"] = count
+                            device_info["File Types"] = file_types
+                        except Exception as e:
+                            device_info["Lightweight Scan Error"] = str(e)
                 return device_info
         return None
 
-    # --- Device View and Export ---
-    def device_view(self, device):
-        """Prints detailed information about the specified device using the collected device info."""
-        info = self.collect_device_info(device)
-        if not info:
-            self.console.print(f"[bold red]Device {device} not found.[/bold red]")
-            return
-
-        self.console.rule(f"[bold red]Device Details: {device}")
-        self.console.print(f"[bold cyan]Mountpoint:[/bold cyan] {info.get('Mountpoint', 'N/A')}")
-        self.console.print(f"[bold magenta]Filesystem Type:[/bold magenta] {info.get('Filesystem Type', 'N/A')}")
-        self.console.print(f"[bold magenta]Mount Options:[/bold magenta] {info.get('Mount Options', 'N/A')}")
-        self.console.print(f"[bold blue]Device Type:[/bold blue] {info.get('Device Type', 'N/A')}")
-        if "Access Restrictions" in info:
-            self.console.print(f"[bold red]Access Restrictions:[/bold red] {info.get('Access Restrictions')}")
-        # Disk Usage
-        if "Total Size" in info:
-            self.console.print(f"[bold yellow]Disk Usage:[/bold yellow]")
-            self.console.print(f"  Total: {info.get('Total Size')}")
-            self.console.print(f"  Used:  {info.get('Used Size')}")
-            self.console.print(f"  Free:  {info.get('Free Size')}")
-            self.console.print(f"  Usage: {info.get('Usage Percent')}")
-        else:
-            self.console.print(f"[bold yellow]Disk Usage:[/bold yellow] Not available")
-        # Filesystem Statistics
-        fs_stats = info.get("Filesystem Statistics")
-        if isinstance(fs_stats, dict):
-            self.console.print(f"[bold green]Filesystem Statistics:[/bold green]")
-            for key, value in fs_stats.items():
-                self.console.print(f"  {key}: {value}")
-        else:
-            self.console.print(f"[bold green]Filesystem Statistics:[/bold green] Not available")
-        # Disk I/O Counters
-        io_counters = info.get("Disk I/O Counters")
-        if isinstance(io_counters, dict):
-            self.console.print(f"[bold blue]Disk I/O Counters:[/bold blue]")
-            for key, value in io_counters.items():
-                self.console.print(f"  {key}: {value}")
-        else:
-            self.console.print(f"[bold blue]Disk I/O Counters:[/bold blue] Not available")
-        # Top-Level Content Overview
-        content_overview = info.get("Top-Level Content Overview")
-        if isinstance(content_overview, dict):
-            self.console.print(f"[bold purple]Top-Level Content Overview:[/bold purple]")
-            self.console.print(f"  Files: {content_overview.get('Files')}, Directories: {content_overview.get('Directories')}")
-        else:
-            self.console.print(f"[bold purple]Top-Level Content Overview:[/bold purple] Not available")
-
-        num_files = info.get("Number of Files")
-        file_types = info.get("File Types")
-        if num_files is not None and isinstance(file_types, dict):
-            self.console.print(f"[bold purple]File Types Breakdown:[/bold purple]")
-            self.console.print(f"Files Scanned: {num_files}")
-            from rich.table import Table
-            ft_table = Table(show_header=True, header_style="bold magenta")
-            ft_table.add_column("File Extension", style="cyan")
-            ft_table.add_column("Count", style="green")
-            for ext, cnt in sorted(file_types.items(), key=lambda x: x[1], reverse=True):
-                ft_table.add_row(ext, str(cnt))
-            self.console.print(ft_table)
-        else:
-            self.console.print("[bold purple]File Types Breakdown:[/bold purple] Not available")
-        self.console.rule()
-
-    def export(self, device):
-        """Exports device information to a selected spreadsheet file."""
-        info = self.collect_device_info(device)
-        if not info:
-            self.console.print(f"[bold red]Device {device} not found.[/bold red]")
-            return
-
-        # Select spreadsheet file from working directory
-        file_path = self.select_spreadsheet()
-        if not file_path:
-            return
-
-        file_ext = os.path.splitext(file_path)[1].lower()
-        try:
-            if file_ext == '.csv':
-                df = pd.read_csv(file_path)
-            else:
-                df = pd.read_excel(file_path)
-        except Exception as e:
-            self.console.print(f"Error reading file: {e}")
-            return
-
-        column_names = list(df.columns)
-
-        # Prompt the user to choose which device info elements to export
-        selected_keys = questionary.checkbox(
-            "Select elements to export:",
-            choices=list(info.keys())
-        ).ask()
-        self.stop_live()
-
-        export_data = {}
-        matched_scores = {}
-        for key in selected_keys:
-            value = info[key]
-            key_doc = self.nlp(key)
-            best_match = None
-            best_score = 0
-            for col in column_names:
-                col_doc = self.nlp(str(col))
-                score = key_doc.similarity(col_doc)
-                print(f"Key: {repr(key)}, Column: {repr(col)}, Score: {repr(score)}")
-                time.sleep(0.1)
-                if score > best_score:
-                    best_score = score
-                    best_match = col
-                    matched_scores[col] = score
-            if best_match and best_score >= matched_scores[best_match]:
-                export_data[best_match] = value
-
-        # Build a new row with all spreadsheet columns (unmatched columns get a value of None)
-        new_row = {col: export_data.get(col, None) for col in column_names}
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-
-        try:
-            if file_ext == '.csv':
-                df.to_csv(file_path, index=False)
-            else:
-                df.to_excel(file_path, index=False)
-            self.console.print(f"Export successful to {file_path}")
-        except Exception as e:
-            self.console.print(f"Error writing to file: {e}")
-
-    def get_access(self, device):
-        try:
-            if psutil.disk_usage(device).total > 0:
-                return True
-        except (PermissionError, FileNotFoundError, OSError):
-            return False
-        return False
-
-    def choose_device(self):
-        """Prompts the user to choose one or more devices from the list."""
-        partitions = psutil.disk_partitions()
-        device_choices = [partition.device for partition in partitions]
-        selected = questionary.checkbox("Select device(s) to view:", choices=device_choices).ask()
-        return selected
-
-    def guess_device_type(self, partition):
-        """
-        Guesses the device type based on its device name, filesystem type, and mount options.
-        Returns a string such as "CD/DVD", "Floppy", "Zip Disk", or "Regular Storage".
-        """
+    @staticmethod
+    def guess_device_type(partition):
         device_lower = partition.device.lower()
         fstype_lower = partition.fstype.lower()
         opts_lower = partition.opts.lower()
-
         if "cdrom" in opts_lower or "iso9660" in fstype_lower or "cdfs" in fstype_lower or device_lower.startswith("/dev/sr"):
             return "CD/DVD"
         elif device_lower.startswith("/dev/fd"):
             return "Floppy"
         elif "zip" in device_lower:
             return "Zip Disk"
-        else:
-            return "Regular Storage"
+        return "Regular Storage"
 
-    class DupeCheck:
-        def __init__(self, directory):
-            self.directory = directory
+# Manages configuration settings
+class ConfigManager:
+    def __init__(self, config_file):
+        self.config_file = config_file
+        self.working_directory = self.load_working_directory()
 
-        def md5(self, file_path):
-            """Calculate the MD5 hash of a file."""
+    def load_working_directory(self):
+        if os.path.exists(self.config_file):
             try:
-                with open(file_path, 'rb') as f:
-                    file_hash = hashlib.md5()
-                    while chunk := f.read(8192):  # Read the file in chunks of 8k
-                        file_hash.update(chunk)
-                return file_hash.hexdigest(), file_path
-            except Exception as e:
-                print(f"Error processing {file_path}: {e}")
-                return None, file_path
+                with open(self.config_file, "r") as f:
+                    config = json.load(f)
+                    return config.get("working_directory")
+            except Exception:
+                return None
+        return None
 
-        def find_duplicates(self):
-            hashes = {}
-            duplicates = {}
+    def save_working_directory(self, directory):
+        try:
+            with open(self.config_file, "w") as f:
+                json.dump({"working_directory": directory}, f)
+            self.working_directory = directory
+        except Exception:
+            pass
 
-            # Walk through the directory to get all files
-            file_paths = []
+    def get_working_directory(self):
+        return self.working_directory
 
-            with alive_bar(title="Scanning Files") as bar:
-                for root, _, files in os.walk(self.directory):
-                    for file in files:
-                        file_paths.append(os.path.join(root, file))
-                        bar()  # Update the progress bar for each file found
+    def set_working_directory(self, directory):
+        self.working_directory = directory
+        self.save_working_directory(directory)
 
-            print(f"Total files to process: {len(file_paths)}")  # Debugging message to check if files are found
+# Handles live monitoring of devices
+class DeviceMonitor:
+    def __init__(self, table_widget):
+        self.table_widget = table_widget
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_table)
 
-            # Using ThreadPoolExecutor to process files in parallel
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                # Map the MD5 calculation to each file path in parallel
-                future_to_file = {executor.submit(self.md5, file_path): file_path for file_path in file_paths}
+    def start_monitoring(self):
+        self.timer.start(5000)  # Update every 5 seconds
+        self.update_table()
 
-                # Initialize the progress bar with the number of files to process
-                with alive_bar(len(future_to_file), title="Processing Files") as bar:
-                    # Ensure the progress bar is updated for each completed task
-                    for future in concurrent.futures.as_completed(future_to_file):
-                        #print("Task completed")  # Debugging message to show task completion
-                        file_hash, file_path = future.result()
+    def stop_monitoring(self):
+        self.timer.stop()
 
-
-                        # Update the progress bar after processing each file
-                        bar()
-
-                        # If a valid hash is returned, check for duplicates
-                        if file_hash:
-                            if file_hash in hashes:
-                                duplicates[file_hash] = [file_path] + duplicates.get(file_hash, [])
-                            else:
-                                hashes[file_hash] = file_path
-            for file_hash in duplicates:
-                duplicates[file_hash].append(hashes[file_hash])
-
-            return duplicates
-
-    def dupe_finder(self):
-        # Get all disk partitions
+    def update_table(self):
         partitions = psutil.disk_partitions()
+        self.table_widget.setRowCount(len(partitions))
+        for i, partition in enumerate(partitions):
+            if self.get_access(partition.device):
+                try:
+                    usage = psutil.disk_usage(partition.mountpoint)
+                    size = bytes2human(usage.total)
+                except Exception:
+                    size = "N/A"
+                self.table_widget.setItem(i, 0, QTableWidgetItem(partition.device))
+                self.table_widget.setItem(i, 1, QTableWidgetItem(partition.opts))
+                self.table_widget.setItem(i, 2, QTableWidgetItem(partition.fstype))
+                self.table_widget.setItem(i, 3, QTableWidgetItem(size))
+            else:
+                self.table_widget.setItem(i, 0, QTableWidgetItem(partition.device))
+                self.table_widget.setItem(i, 1, QTableWidgetItem("N/A"))
+                self.table_widget.setItem(i, 2, QTableWidgetItem("N/A"))
+                self.table_widget.setItem(i, 3, QTableWidgetItem("N/A"))
 
-        # List available partitions for the user to select
-        device_choices = [partition.device for partition in partitions]
+    def get_access(self, device):
+        try:
+            return psutil.disk_usage(device).total > 0
+        except (PermissionError, FileNotFoundError, OSError):
+            return False
 
-        # Prompt user to select one or more devices
-        device_paths = questionary.checkbox("Select device(s) to view:", choices=device_choices).ask()
+# Handles viewing detailed device information
+class DeviceViewer:
+    def __init__(self, output_widget, figure, canvas):
+        self.output_widget = output_widget
+        self.figure = figure
+        self.canvas = canvas
 
-        def chooseDir(directory):
-            return questionary.select("Select directory to search", choices=os.listdir(directory)).ask()
+    def view_device(self, device, use_siegfried=True, directory=None):
+        info = DeviceInfoCollector.collect_device_info(device, use_siegfried, directory)
+        if not info:
+            self.output_widget.setText(f"Device {device} not found.")
+            return
 
-        # Ensure the selected devices exist and walk through the directories
-        for device_path in device_paths:
-            # Find the mount point for each device
-            for partition in partitions:
-                print(partition.mountpoint)
-                if partition.device == device_path:
-                    directory = partition.mountpoint
-                    if os.path.exists(directory):
-                        try:
-                            searching = True
-                            while searching:
-                                print(f"Directory: {directory}")
-                                answer = input("Go to subdirectory (yes/no): ").lower()
-                                if answer in ["yes", "no"]:
-                                    if answer == "yes":
-                                        directory = directory + "/" + chooseDir(directory)
-                                    else:
-                                        searching = False
-                                else:
-                                    print("Please answer 'yes' or 'no'.")
-                            print(f"Exploring {directory}...")
-                            dupeFinder = self.DupeCheck(directory)
-                            duplicates = dupeFinder.find_duplicates()
-                        except PermissionError:
-                            print("PermissionError")
-                    else:
-                        print(f"{mount_point} does not exist or is not mounted.")
-        for hash in duplicates:
-            print(duplicates[hash])
+        output = []
+        output.append(f"Device Details: {device}")
+        output.append(f"Mountpoint: {info.get('Mountpoint', 'N/A')}")
+        output.append(f"Filesystem Type: {info.get('Filesystem Type', 'N/A')}")
+        output.append(f"Mount Options: {info.get('Mount Options', 'N/A')}")
+        output.append(f"Device Type: {info.get('Device Type', 'N/A')}")
+        if "Access Restrictions" in info:
+            output.append(f"Access Restrictions: {info['Access Restrictions']}")
+
+        if "Total Size" in info:
+            output.append("Disk Usage:")
+            output.append(f"  Total: {info['Total Size']}")
+            output.append(f"  Used: {info['Used Size']}")
+            output.append(f"  Free: {info['Free Size']}")
+            output.append(f"  Usage: {info['Usage Percent']}")
+        else:
+            output.append("Disk Usage: Not available")
+
+        fs_stats = info.get("Filesystem Statistics")
+        if isinstance(fs_stats, dict):
+            output.append("\nFilesystem Statistics:")
+            for key, value in fs_stats.items():
+                output.append(f"  {key}: {value}")
+        else:
+            output.append("Filesystem Statistics: Not available")
+
+        io_counters = info.get("Disk I/O Counters")
+        if isinstance(io_counters, dict):
+            output.append("Disk I/O Counters:")
+            for key, value in io_counters.items():
+                output.append(f"  {key}: {value}")
+        else:
+            output.append("Disk I/O Counters: Not available")
+
+        content = info.get("Top-Level Content Overview")
+        if isinstance(content, dict):
+            output.append("Top-Level Content Overview:")
+            output.append(f"  Files: {content['Files']}, Directories: {content['Directories']}")
+        else:
+            output.append("Top-Level Content Overview: Not available")
+
+        # File format identification results
+        if use_siegfried:
+            if "Siegfried Status" in info:
+                output.append(f"\nSiegfried: {info['Siegfried Status']}")
+            elif "Siegfried Error" in info:
+                output.append(f"\nSiegfried Error: {info['Siegfried Error']}")
+            elif "Siegfried Exception" in info:
+                output.append(f"\nSiegfried Exception: {info['Siegfried Exception']}")
+            elif "File Formats" in info and info["File Formats"]:
+                formats = info["File Formats"]
+                scanned_files = info.get("Scanned Files", 0)
+                output.append("\nFile Formats Breakdown (PRONOM):")
+                output.append(f"  Files Scanned: {scanned_files}\n")
+                output.append(f"{'Count':<6} | {'Format (PUID)'}")
+                output.append(f"{'-'*6} | {'-'*30}")
+                for fmt, cnt in sorted(formats.items(), key=lambda x: x[1], reverse=True):
+                    output.append(f"{cnt:<6} | {fmt}")
+                
+                # Generate chart
+                self.figure.clear()
+                ax = self.figure.add_subplot(111)
+                top_formats = sorted(formats.items(), key=lambda x: x[1], reverse=True)[:10]
+                if top_formats:
+                    labels = [f[0] for f in top_formats]
+                    counts = [f[1] for f in top_formats]
+                    ax.bar(labels, counts)
+                    ax.set_xlabel('File Formats (PUID)')
+                    ax.set_ylabel('Frequency')
+                    ax.set_title('Top File Formats Frequency')
+                    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+                    self.figure.tight_layout()
+                else:
+                    # Display a message when no formats are found
+                    ax.text(0.5, 0.5, 'No file formats detected', 
+                           horizontalalignment='center', verticalalignment='center',
+                           transform=ax.transAxes, fontsize=14)
+                    ax.set_axis_off()
+                self.canvas.draw()
+            else:
+                output.append("\nFile Formats Breakdown (PRONOM): Not available")
+                # Clear the chart and display a message
+                self.figure.clear()
+                ax = self.figure.add_subplot(111)
+                ax.text(0.5, 0.5, 'No file formats data available', 
+                       horizontalalignment='center', verticalalignment='center',
+                       transform=ax.transAxes, fontsize=14)
+                ax.set_axis_off()
+                self.canvas.draw()
+        else:
+            # Lightweight file type scanning results
+            if "Lightweight Scan Error" in info:
+                output.append(f"\nLightweight Scan Error: {info['Lightweight Scan Error']}")
+            elif "File Types" in info and info["File Types"]:
+                file_types = info["File Types"]
+                scanned_files = info.get("Scanned Files", 0)
+                output.append("\nFile Types Breakdown (Lightweight):")
+                output.append(f"  Files Scanned: {scanned_files}\n")
+                output.append(f"{'Count':<6} | {'Extension'}")
+                output.append(f"{'-'*6} | {'-'*15}")
+                
+                for ext, cnt in sorted(file_types.items(), key=lambda x: x[1], reverse=True):
+                    output.append(f"{cnt:<6} | {ext}")
+                
+                # Generate chart for lightweight scan
+                self.figure.clear()
+                ax = self.figure.add_subplot(111)
+                top_extensions = sorted(file_types.items(), key=lambda x: x[1], reverse=True)[:10]
+                if top_extensions:
+                    labels = [f[0] for f in top_extensions]
+                    counts = [f[1] for f in top_extensions]
+                    ax.bar(labels, counts)
+                    ax.set_xlabel('File Extensions')
+                    ax.set_ylabel('Frequency')
+                    ax.set_title('Top File Extensions Frequency')
+                    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+                    self.figure.tight_layout()
+                else:
+                    # Display a message when no extensions are found
+                    ax.text(0.5, 0.5, 'No file extensions detected', 
+                           horizontalalignment='center', verticalalignment='center',
+                           transform=ax.transAxes, fontsize=14)
+                    ax.set_axis_off()
+                self.canvas.draw()
+            else:
+                output.append("\nFile Types Breakdown (Lightweight): Not available")
+                # Clear the chart and display a message
+                self.figure.clear()
+                ax = self.figure.add_subplot(111)
+                ax.text(0.5, 0.5, 'No file types data available', 
+                       horizontalalignment='center', verticalalignment='center',
+                       transform=ax.transAxes, fontsize=14)
+                ax.set_axis_off()
+                self.canvas.draw()
+
+        self.output_widget.setText("\n".join(output))
+
+# Custom dialog for selecting device info elements to export
+class ElementSelectionDialog(QDialog):
+    def __init__(self, elements, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Elements to Export")
+        self.layout = QVBoxLayout()
+        self.checkboxes = []
+
+        for element in elements:
+            checkbox = QCheckBox(element)
+            checkbox.setFont(QFont("Arial", DEFAULT_FONT_SIZE))
+            self.checkboxes.append(checkbox)
+            self.layout.addWidget(checkbox)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        self.layout.addWidget(button_box)
+        self.setLayout(self.layout)
+
+    def get_selected_elements(self):
+        return [cb.text() for cb in self.checkboxes if cb.isChecked()]
+
+# Handles exporting device information with spaCy matching
+class Exporter:
+    def __init__(self, config_manager):
+        self.config_manager = config_manager
+        try:
+            self.nlp = spacy.load("en_core_web_lg")
+        except OSError:
+            # Show a message if the spaCy model is not available
+            QMessageBox.warning(None, "spaCy Model Missing", 
+                               "The spaCy model 'en_core_web_lg' is not installed. "
+                               "Please install it with: python -m spacy download en_core_web_lg")
+            self.nlp = None
+
+    def export_device(self, device, parent_widget):
+        if not self.nlp:
+            parent_widget.statusBar().showMessage("spaCy model not available. Cannot export.", 5000)
+            return
+            
+        info = DeviceInfoCollector.collect_device_info(device)
+        if not info:
+            parent_widget.statusBar().showMessage(f"Device {device} not found.", 5000)
+            return
+
+        # Prompt user to select elements to export
+        dialog = ElementSelectionDialog(list(info.keys()), parent_widget)
+        if dialog.exec_() == QDialog.Rejected:
+            return
+        selected_keys = dialog.get_selected_elements()
+        if not selected_keys:
+            parent_widget.statusBar().showMessage("No elements selected for export.", 5000)
+            return
+
+        # Select spreadsheet file
+        working_directory = self.config_manager.get_working_directory()
+        if not working_directory:
+            working_directory = QFileDialog.getExistingDirectory(parent_widget, "Select Working Directory")
+            if not working_directory:
+                return
+            self.config_manager.set_working_directory(working_directory)
+
+        file_path = QFileDialog.getSaveFileName(parent_widget, "Save Spreadsheet", working_directory, "CSV (*.csv);;Excel (*.xlsx)")[0]
+        if not file_path:
+            return
+
+        try:
+            # Read existing spreadsheet or create a new one
+            if os.path.exists(file_path):
+                if file_path.endswith('.csv'):
+                    df = pd.read_csv(file_path)
+                else:
+                    df = pd.read_excel(file_path)
+            else:
+                df = pd.DataFrame()
+            column_names = list(df.columns) if not df.empty else []
+
+            # Match selected keys to spreadsheet columns using spaCy
+            export_data = {}
+            matched_scores = {}
+            col_docs = {col: self.nlp(col) for col in column_names}
+
+            for key in selected_keys:
+                value   = info[key]
+                key_doc = self.nlp(key)
+                best_match = None
+                best_score = 0
+
+                for col, col_doc in col_docs.items():
+                    score = key_doc.similarity(col_doc)
+                    if score > best_score:
+                        best_score  = score
+                        best_match  = col
+
+                # If it's a good match, map to that column; otherwise add a new one
+                if best_match and best_score >= matched_scores.get(best_match, 0):
+                    export_data[best_match] = value
+                    matched_scores[best_match] = best_score
+                else:
+                    export_data[key] = value
+                    if key not in column_names:
+                        column_names.append(key)
+
+            # Build new row with all spreadsheet columns
+            new_row = {col: export_data.get(col, None) for col in column_names}
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+            # Save to file
+            if file_path.endswith('.csv'):
+                df.to_csv(file_path, index=False)
+            else:
+                df.to_excel(file_path, index=False)
+            parent_widget.statusBar().showMessage(f"Exported to {file_path}", 5000)
+        except Exception as e:
+            parent_widget.statusBar().showMessage(f"Error exporting: {e}", 5000)
+
+class DuplicateFinderThread(QThread):
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(dict)
+
+    def __init__(self, directory):
+        super().__init__()
+        self.directory = directory
+        self._result_all_hashes = {}  # Store all file hashes
+
+    def md5(self, file_path):
+        try:
+            with open(file_path, 'rb') as f:
+                file_hash = hashlib.md5()
+                while chunk := f.read(8192):
+                    file_hash.update(chunk)
+                return file_hash.hexdigest(), file_path
+        except Exception:
+            return None, file_path
 
     def run(self):
-        """
-        Main loop:
-          - Starts the live table for a few seconds,
-          - Stops it to let the user interact with a menu,
-          - If a device is chosen, displays its details or exports its data,
-          - Then restarts the live view.
-        """
-        while True:
-            action = questionary.select(
-                "Choose an action:",
-                choices=["View Device", "Export to Spreadsheet", "Set Working Directory", "Find Duplicates", "Exit"]
-            ).ask()
-            self.stop_live()
+        hashes = {}
+        duplicates = {}
+        file_paths = []
 
-            if action == "View Device":
-                selected_devices = self.choose_device()
-                if selected_devices:
-                    for device in selected_devices:
-                        self.device_view(device)
-                    questionary.text("Press Enter to continue...").ask()
-            elif action == "Export to Spreadsheet":
-                selected_devices = self.choose_device()
-                if selected_devices:
-                    for device in selected_devices:
-                        self.export(device)
-            elif action == "Set Working Directory":
-                self.set_working_directory()
-            elif action == "Find Duplicates":
-                self.dupe_finder()
-            elif action == "Exit":
-                break
+        # Scan all files in the directory
+        for root, _, files in os.walk(self.directory):
+            for file in files:
+                file_paths.append(os.path.join(root, file))
+
+        total_files = len(file_paths)
+        if total_files == 0:
+            self.finished.emit({})
+            return
+            
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_to_file = {executor.submit(self.md5, fp): fp for fp in file_paths}
+            processed = 0
+            for future in concurrent.futures.as_completed(future_to_file):
+                processed += 1
+                self.progress.emit(int((processed / total_files) * 100))
+                file_hash, file_path = future.result()
+                if file_hash:
+                    if file_hash in hashes:
+                        if file_hash in duplicates:
+                            duplicates[file_hash].append(file_path)
+                        else:
+                            duplicates[file_hash] = [hashes[file_hash], file_path]
+                    else:
+                        hashes[file_hash] = file_path
+
+        # Store all file hashes for later use (including unique files)
+        self._result_all_hashes = hashes
+
+        self.finished.emit(duplicates)
+
+# Handles finding duplicate files
+class DuplicateFinder:
+    def __init__(self, combo_box, dir_input, btn_browse, btn_find,
+                 progress_bar, table_widget, filter_dropdown, parent_widget):
+        self.combo_box = combo_box
+        self.dir_input = dir_input
+        self.btn_browse = btn_browse
+        self.btn_find = btn_find
+        self.progress_bar = progress_bar
+        self.table_widget = table_widget
+        self.filter_dropdown = filter_dropdown
+        self.parent_widget = parent_widget
+
+        self.all_file_hashes = {}  # Store all files, not just dupes
+        self.duplicates_only = {}
+
+        self.btn_browse.clicked.connect(self.browse_directory)
+        self.btn_find.clicked.connect(self.find_duplicates)
+        self.filter_dropdown.currentIndexChanged.connect(self.update_table_display)
+
+    def browse_directory(self):
+        device = self.combo_box.currentText()
+        mountpoint = next((p.mountpoint for p in psutil.disk_partitions() if p.device == device), None)
+        if mountpoint:
+            directory = QFileDialog.getExistingDirectory(self.parent_widget, "Select Directory", mountpoint)
+            if directory:
+                self.dir_input.setText(directory)
+
+    def find_duplicates(self):
+        directory = self.dir_input.text() or next((p.mountpoint for p in psutil.disk_partitions() if p.device == self.combo_box.currentText()), None)
+        if not directory or not os.path.exists(directory):
+            self.parent_widget.statusBar().showMessage("Invalid directory selected.", 5000)
+            return
+
+        self.dupe_thread = DuplicateFinderThread(directory)
+        self.dupe_thread.progress.connect(self.progress_bar.setValue)
+        self.dupe_thread.finished.connect(self.display_duplicates)
+        self.dupe_thread.start()
+        self.btn_find.setEnabled(False)
+
+    def display_duplicates(self, duplicates):
+        self.duplicates_only = duplicates
+        self.all_file_hashes = {}  # key: hash, value: list of files
+
+        for hash_val, files in duplicates.items():
+            self.all_file_hashes[hash_val] = files
+
+        # Add in non-duplicate hashes from the scan
+        for hash_val, file_path in self.dupe_thread._result_all_hashes.items():
+            if hash_val not in self.all_file_hashes:
+                self.all_file_hashes[hash_val] = [file_path]
+
+        self.update_table_display()
+        self.btn_find.setEnabled(True)
+        self.parent_widget.statusBar().showMessage("Duplicate search completed.", 5000)
+
+    def update_table_display(self):
+        # Get current mode from the dropdown
+        mode = self.filter_dropdown.currentText()
+
+        # Use the appropriate data based on the selected mode
+        data_to_display = self.duplicates_only if mode == "Duplicates Only" else self.all_file_hashes
+
+        # Build a flat list of rows: one row per file
+        rows = []
+        for hash_value, files in data_to_display.items():
+            for file_path in files:
+                file_name = os.path.basename(file_path)
+                rows.append((file_name, hash_value, file_path))
+
+        # Update table size
+        self.table_widget.setRowCount(len(rows))
+
+        # Fill table with rows
+        for i, (file_name, hash_value, file_path) in enumerate(rows):
+            self.table_widget.setItem(i, 0, QTableWidgetItem(str(file_name)))
+            self.table_widget.setItem(i, 1, QTableWidgetItem(str(hash_value)))
+            self.table_widget.setItem(i, 2, QTableWidgetItem(str(file_path)))
+
+
+    def copy_file(src_path, dst_path, buffer_size=1024*1024):
+        # Read/write in chunks so you don't blow out memory on large files
+        with open(src_path, "rb") as src, open(dst_path, "wb") as dst:
+            while True:
+                chunk = src.read(buffer_size)
+                if not chunk:
+                    break
+                dst.write(chunk)
+
+        # Preserve original timestamps (access & modification times)
+        stat = os.stat(src_path)
+        os.utime(dst_path, (stat.st_atime, stat.st_mtime))
+
+    def create_duplicate_folder(self, duplicates):
+        base_dup_dir = os.path.join(self.parent_widget.config_manager.get_working_directory(),"Duplicates")
+        os.makedirs(base_dup_dir, exist_ok=True)
+
+        for hash_value, files in duplicates.items():
+            hash_dir = os.path.join(base_dup_dir, hash_value)
+            os.makedirs(hash_dir, exist_ok=True)
+
+            for file_path in files:
+                try:
+                    dest = os.path.join(hash_dir, os.path.basename(file_path))
+                    self.copy_file(file_path, dest)
+                except Exception as e:
+                    self.parent_widget.statusBar().showMessage(f"Error copying {file_path}: {e}", 5000)
+
+# Main application
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Device Monitor App")
+        self.setGeometry(100, 100, 659, 800) 
+        self.setFixedSize(659, 800)
+        self.config_manager = ConfigManager(CONFIG_FILE)
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
+        
+        # Set application-wide font
+        font = QFont()
+        font.setPointSize(DEFAULT_FONT_SIZE)
+        self.setFont(font)
+        
+        self.init_tabs()
+
+    def init_tabs(self):
+        self.tab_monitor = QWidget()
+        self.tab_view = QWidget()
+        #self.tab_export = QWidget()
+        self.tab_dupes = QWidget()
+        self.tab_settings = QWidget()
+
+        self.tabs.addTab(self.tab_monitor, "Monitor")
+        self.tabs.addTab(self.tab_view, "File Scan")
+        #self.tabs.addTab(self.tab_export, "Export")
+        self.tabs.addTab(self.tab_dupes, "Duplicates")
+        self.tabs.addTab(self.tab_settings, "Settings")
+
+        self.init_monitor_tab()
+        self.init_view_tab()
+        #self.init_export_tab()
+        self.init_duplicates_tab()
+        self.init_settings_tab()
+        
+        self.exporter = Exporter(self.config_manager)
+
+    def init_monitor_tab(self):
+        layout = QVBoxLayout()
+        device_table = QTableWidget()
+        device_table.setColumnCount(4)
+        device_table.setHorizontalHeaderLabels(["Device", "Type", "Filesystem", "Size"])
+        
+        # Set font size for table
+        font = device_table.font()
+        font.setPointSize(DEFAULT_FONT_SIZE)
+        device_table.setFont(font)
+        
+        layout.addWidget(device_table)
+        self.tab_monitor.setLayout(layout)
+
+        self.device_monitor = DeviceMonitor(device_table)
+        self.device_monitor.start_monitoring()
+
+    def init_view_tab(self):
+        # Create main layout
+        main_layout = QVBoxLayout()
+        
+        # First row: Device selection and scan method
+        top_row_layout = QHBoxLayout()
+        device_combo = QComboBox()
+        device_combo.setFixedWidth(200)
+        self.update_device_combo(device_combo)
+        
+        # Add scan method dropdown
+        scan_method_label = QLabel("Scan Method:")
+        scan_method_combo = QComboBox()
+        scan_method_combo.addItems(["Siegfried", "Lightweight"])
+        scan_method_combo.setCurrentText("Siegfried")  # Default to Siegfried
+        
+        top_row_layout.addWidget(device_combo)
+        top_row_layout.addWidget(scan_method_label)
+        top_row_layout.addWidget(scan_method_combo)
+        top_row_layout.addStretch()
+        
+        # Second row: Directory selection
+        dir_layout = QHBoxLayout()
+        dir_label = QLabel("Directory (optional):")
+        dir_input = QLineEdit()
+        dir_input.setPlaceholderText("Enter or select a directory")
+        btn_browse_dir = QPushButton("Browse")
+        
+        dir_layout.addWidget(dir_label)
+        dir_layout.addWidget(dir_input)
+        dir_layout.addWidget(btn_browse_dir)
+        
+        # Third row: View button
+        btn_view_device = QPushButton("View Selected Device Info")
+        
+        # Console output
+        console_output = QTextEdit()
+        console_output.setReadOnly(True)
+        font = QFont("Courier New", DEFAULT_FONT_SIZE)
+        console_output.setFont(font)
+        
+        # Export button
+        btn_export = QPushButton("Export Device Info")
+
+        # Create Matplotlib figure and canvas
+        self.figure = Figure(figsize=(8, 8))
+        self.canvas = FigureCanvas(self.figure)
+        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        # Add all to main layout
+        main_layout.addLayout(top_row_layout)
+        main_layout.addLayout(dir_layout)
+        main_layout.addWidget(btn_view_device)
+        main_layout.addWidget(console_output, 2)
+        main_layout.addWidget(self.canvas, 1)
+        main_layout.addWidget(btn_export)
+        
+        self.tab_view.setLayout(main_layout)
+
+        # Connect browse button
+        def browse_directory():
+            device = device_combo.currentText()
+            mountpoint = next((p.mountpoint for p in psutil.disk_partitions() if p.device == device), None)
+            if mountpoint:
+                directory = QFileDialog.getExistingDirectory(self, "Select Directory", mountpoint)
+                if directory:
+                    dir_input.setText(directory)
+        
+            btn_browse_dir.clicked.connect(browse_directory)
+        
+        self.device_viewer = DeviceViewer(console_output, self.figure, self.canvas)
+        
+        # Connect view button
+        btn_view_device.clicked.connect(lambda: self.device_viewer.view_device(
+            device_combo.currentText(),
+            scan_method_combo.currentText() == "Siegfried",
+            dir_input.text() if dir_input.text() else None
+        ))
+        
+        btn_export.clicked.connect(lambda: self.exporter.export_device(device_combo.currentText(), self))
+    
+    def update_device_combo(self, combo_box):
+        combo_box.clear()
+        partitions = psutil.disk_partitions()
+        for partition in partitions:
+            combo_box.addItem(partition.device)
+
+    # def init_export_tab(self):
+    #     layout = QVBoxLayout()
+    #     export_combo = QComboBox()
+    #     self.update_device_combo(export_combo)
+    #     btn_export = QPushButton("Export Device Info to Spreadsheet")
+    #     layout.addWidget(export_combo)
+    #     layout.addWidget(btn_export)
+    #     self.tab_export.setLayout(layout)
+
+    #     btn_export.clicked.connect(lambda: self.exporter.export_device(export_combo.currentText(), self))
+
+    def init_duplicates_tab(self):
+        layout = QVBoxLayout()
+
+        # Top row: Device dropdown and filter dropdown
+        top_row_layout = QHBoxLayout()
+        dupe_combo = QComboBox()
+        dupe_combo.setFixedWidth(200)
+        self.update_device_combo(dupe_combo)
+
+        filter_dropdown = QComboBox()
+        filter_dropdown.addItems(["Duplicates Only", "All Files"])
+
+        top_row_layout.addWidget(dupe_combo)
+        top_row_layout.addWidget(QLabel("View:"))
+        top_row_layout.addWidget(filter_dropdown)
+        top_row_layout.addStretch()
+        # Removed the stretch that was pushing the filter to the right
+
+        # Second row: Directory input and browse button
+        dir_layout = QHBoxLayout()
+        dir_label = QLabel("Directory (optional):")
+        dir_input = QLineEdit()
+        dir_input.setPlaceholderText("Enter or select a directory")
+        btn_browse_dir = QPushButton("Browse")
+
+        dir_layout.addWidget(dir_label)
+        dir_layout.addWidget(dir_input)
+        dir_layout.addWidget(btn_browse_dir)
+
+        # Other elements
+        btn_find_dupes = QPushButton("Find Duplicate Files")
+        dupe_progress = QProgressBar()
+
+        dupe_table = QTableWidget()
+        dupe_table.setColumnCount(3)
+        dupe_table.setHorizontalHeaderLabels(["File Name", "Hash", "Location"])
+
+        # Set font size for table
+        font = dupe_table.font()
+        font.setPointSize(DEFAULT_FONT_SIZE)
+        dupe_table.setFont(font)
+
+        # set initial column widths
+        dupe_table.setColumnWidth(0, 300)
+        dupe_table.setColumnWidth(1, 220)
+        dupe_table.setColumnWidth(2, 400)
+        dupe_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        dupe_table.setSortingEnabled(True)
+
+        # Add all to main layout
+        layout.addLayout(top_row_layout)
+        layout.addLayout(dir_layout)
+        layout.addWidget(btn_find_dupes)
+        layout.addWidget(dupe_progress)
+        layout.addWidget(dupe_table)
+
+        self.tab_dupes.setLayout(layout)
+
+        self.duplicate_finder = DuplicateFinder(
+            dupe_combo, dir_input, btn_browse_dir, btn_find_dupes,
+            dupe_progress, dupe_table, filter_dropdown, self)
+
+        self.duplicate_finder.create_duplicate_folder(self.duplicate_finder.duplicates_only)
+
+    def init_settings_tab(self):
+        layout = QVBoxLayout()
+        btn_set_directory = QPushButton("Set Working Directory")
+        dir_label = QLabel(f"Current Directory: {self.config_manager.get_working_directory() or 'Not set'}")
+        layout.addWidget(btn_set_directory)
+        layout.addWidget(dir_label)
+        layout.addStretch()
+        self.tab_settings.setLayout(layout)
+
+        btn_set_directory.clicked.connect(lambda: self.set_working_directory(dir_label))
+
+    def set_working_directory(self, dir_label):
+        directory = QFileDialog.getExistingDirectory(self, "Select Working Directory")
+        if directory:
+            self.config_manager.set_working_directory(directory)
+            dir_label.setText(f"Current Directory: {directory}")
 
 if __name__ == "__main__":
-    print("""
-  ▒▓██████▓▒  ▒▓███████▓▒   ▒▓██████▓▒  ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒ ▒▓████████▓▒ ▒▓██████████████▓▒
- ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒        ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒  ▒▓█▓▒
- ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒        ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▓█▓▒  ▒▓█▓▒      ▒▓██▓▒  ▒▓█▓▒  ▒▓█▓▒  ▒▓█▓▒
- ▒▓████████▓▒ ▒▓███████▓▒  ▒▓█▓▒        ▒▓████████▓▒ ▒▓█▓▒  ▒▓█▓▒ ▓█▓▒  ▒▓█▓▒    ▒▓██▓▒    ▒▓█▓▒  ▒▓█▓▒  ▒▓█▓▒
- ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒        ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒   ▒▓█▓▓█▓▒   ▒▓█▓▒  ▒▓██▓▒      ▒▓█▓▒  ▒▓█▓▒  ▒▓█▓▒
- ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒   ▒▓█▓▓█▓▒   ▒▓█▓▒ ▒▓█▓▒        ▒▓█▓▒  ▒▓█▓▒  ▒▓█▓▒
- ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒  ▒▓█▓▒  ▒▓██████▓▒  ▒▓█▓▒  ▒▓█▓▒ ▒▓█▓▒    ▒▓██▓▒    ▒▓█▓▒ ▒▓████████▓▒ ▒▓█▓▒  ▒▓█▓▒  ▒▓█▓▒
-    """)
-    monitor = DeviceMonitor()
-    monitor.run()
-
-
+    app = QApplication(sys.argv)
+    
+    # Set application-wide font
+    font = QFont()
+    font.setPointSize(DEFAULT_FONT_SIZE)
+    app.setFont(font)
+    
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())

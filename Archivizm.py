@@ -3,6 +3,7 @@ import sys
 import json
 import psutil
 from psutil._common import bytes2human
+import platform
 import hashlib
 import concurrent.futures
 import pandas as pd
@@ -1349,4 +1350,3 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
-

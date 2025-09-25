@@ -26,10 +26,29 @@ DEFAULT_FONT_SIZE = 10
 
 CONFIG_FILE = "config.json"
 
-# Utility class to collect device information
 class DeviceInfoCollector:
+    """
+    Utility class for collecting detailed information about a device or directory.
+
+    This class provides static methods to gather information about storage devices, including
+    filesystem details, disk usage, I/O counters, and file format identification using Siegfried
+    or lightweight scanning.
+    """
+
     @staticmethod
     def collect_device_info(device, use_siegfried=True, directory=None):
+        """
+        Collects comprehensive information about a specified device or directory.
+
+        Gathers details such as mountpoint, filesystem type, disk usage, I/O counters, and file
+        format information. Uses Siegfried for file format identification if enabled, otherwise
+        performs lightweight extension-based scanning.
+
+        @param device: The device path (e.g., '/dev/sda1') to analyze.
+        @param use_siegfried: Boolean indicating whether to use Siegfried for file format identification.
+        @param directory: Optional directory path to scan instead of the device's mountpoint.
+        @return: A dictionary containing device information or None if the device is not found.
+        """
         device_info = {}
         partitions = psutil.disk_partitions()
         for partition in partitions:
@@ -172,6 +191,15 @@ class DeviceInfoCollector:
 
     @staticmethod
     def guess_device_type(partition):
+        """
+        Determines the type of a storage device based on its properties.
+
+        Analyzes the device path, filesystem type, and mount options to classify
+        the device as CD/DVD, Floppy, Zip Disk, or Regular Storage.
+
+        @param partition: A psutil partition object containing device details.
+        @return: A string indicating the device type (e.g., 'CD/DVD', 'Regular Storage').
+        """
         device_lower = partition.device.lower()
         fstype_lower = partition.fstype.lower()
         opts_lower = partition.opts.lower()
@@ -183,9 +211,23 @@ class DeviceInfoCollector:
             return "Zip Disk"
         return "Regular Storage"
 
-# Manages configuration settings
 class ConfigManager:
+    """
+    Manages configuration settings for the application.
+
+    Handles loading, saving, and updating configuration data stored in a JSON file,
+    including the working directory and duplicates table column visibility settings.
+    """
+
     def __init__(self, config_file):
+        """
+        Initializes the ConfigManager with a specified configuration file.
+
+        Loads the configuration from the file or initializes with default settings
+        if the file does not exist or is corrupted.
+
+        @param config_file: The path to the configuration JSON file.
+        """
         self.config_file = config_file
         self.default_config = {
             "working_directory": None,
@@ -198,7 +240,14 @@ class ConfigManager:
         self.config = self.load_config()
 
     def load_config(self):
-        """Load config from file or return default config if file doesn't exist"""
+        """
+        Loads configuration from the JSON file.
+
+        If the file exists, it merges the loaded configuration with default settings.
+        If the file is missing or corrupted, it creates a new file with default settings.
+
+        @return: A dictionary containing the configuration settings.
+        """
         if os.path.exists(self.config_file):
             try:
                 with open(self.config_file, "r") as f:
@@ -217,7 +266,11 @@ class ConfigManager:
             return self.default_config.copy()
 
     def save_config(self, config=None):
-        """Save config to file"""
+        """
+        Saves configuration to the JSON file.
+
+        @param config: Optional dictionary to save; if None, saves the current configuration.
+        """
         if config is None:
             config = self.config
         try:
@@ -227,34 +280,79 @@ class ConfigManager:
             pass
 
     def get_working_directory(self):
+        """
+        Retrieves the current working directory from the configuration.
+
+        @return: The working directory path as a string, or None if not set.
+        """
         return self.config.get("working_directory")
 
     def set_working_directory(self, directory):
+        """
+        Sets and saves the working directory in the configuration.
+
+        @param directory: The directory path to set as the working directory.
+        """
         self.config["working_directory"] = directory
         self.save_config()
 
     def get_duplicates_table_columns(self):
+        """
+        Retrieves the visibility settings for duplicates table columns.
+
+        @return: A dictionary mapping column names to their visibility (True/False).
+        """
         return self.config.get("duplicates_table_columns", self.default_config["duplicates_table_columns"])
 
     def set_duplicates_table_columns(self, columns):
+        """
+        Sets and saves the visibility settings for duplicates table columns.
+
+        @param columns: A dictionary mapping column names to their visibility (True/False).
+        """
         self.config["duplicates_table_columns"] = columns
         self.save_config()
 
-# Handles live monitoring of devices
 class DeviceMonitor:
+    """
+    Manages live monitoring of storage devices.
+
+    Updates a table widget with real-time information about device partitions,
+    including size and access status, using a QTimer for periodic updates.
+    """
+
     def __init__(self, table_widget):
+        """
+        Initializes the DeviceMonitor with a table widget for displaying device data.
+
+        @param table_widget: QTableWidget to display device information.
+        """
         self.table_widget = table_widget
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_table)
 
     def start_monitoring(self):
+        """
+        Starts periodic monitoring of devices.
+
+        Updates the table every 5 seconds with current device information.
+        """
         self.timer.start(5000)  # Update every 5 seconds
         self.update_table()
 
     def stop_monitoring(self):
+        """
+        Stops the periodic monitoring of devices.
+        """
         self.timer.stop()
 
     def update_table(self):
+        """
+        Updates the table widget with current device information.
+
+        Populates the table with device details such as device path, mount options,
+        filesystem type, and total size. Displays 'N/A' for inaccessible devices.
+        """
         partitions = psutil.disk_partitions()
         self.table_widget.setRowCount(len(partitions))
         for i, partition in enumerate(partitions):
@@ -275,19 +373,49 @@ class DeviceMonitor:
                 self.table_widget.setItem(i, 3, QTableWidgetItem("N/A"))
 
     def get_access(self, device):
+        """
+        Checks if a device is accessible by attempting to retrieve its disk usage.
+
+        @param device: The device path to check.
+        @return: Boolean indicating whether the device is accessible.
+        """
         try:
             return psutil.disk_usage(device).total > 0
         except (PermissionError, FileNotFoundError, OSError):
             return False
 
-# Handles viewing detailed device information
 class DeviceViewer:
+    """
+    Handles displaying detailed device information and visualizations.
+
+    Displays device details in a text widget and generates a bar chart of file formats
+    or extensions using matplotlib, based on data from DeviceInfoCollector.
+    """
+
     def __init__(self, output_widget, figure, canvas):
+        """
+        Initializes the DeviceViewer with widgets for output and visualization.
+
+        @param output_widget: QTextEdit widget for displaying textual device information.
+        @param figure: Matplotlib Figure object for plotting.
+        @param canvas: FigureCanvasQTAgg object for rendering the plot.
+        """
         self.output_widget = output_widget
         self.figure = figure
         self.canvas = canvas
 
     def view_device(self, device, use_siegfried=True, directory=None):
+        """
+        Displays detailed information and a visualization for a specified device.
+
+        Collects device information using DeviceInfoCollector and displays it in the
+        output widget. Generates a bar chart of the top 10 file formats (Siegfried) or
+        extensions (lightweight scan).
+
+        @param device: The device path to analyze.
+        @param use_siegfried: Boolean indicating whether to use Siegfried for file format identification.
+        @param directory: Optional directory path to scan instead of the device's mountpoint.
+        """
         info = DeviceInfoCollector.collect_device_info(device, use_siegfried, directory)
         if not info:
             self.output_widget.setText(f"Device {device} not found.")
@@ -430,9 +558,21 @@ class DeviceViewer:
 
         self.output_widget.setText("\n".join(output))
 
-# Custom dialog for selecting device info elements to export
 class ElementSelectionDialog(QDialog):
+    """
+    A dialog for selecting device information elements to export.
+
+    Displays a list of checkboxes for each available element, allowing the user to
+    choose which elements to include in an export operation.
+    """
+
     def __init__(self, elements, parent=None):
+        """
+        Initializes the dialog with a list of elements as checkboxes.
+
+        @param elements: List of element names to display as checkboxes.
+        @param parent: Optional parent widget for the dialog.
+        """
         super().__init__(parent)
         self.setWindowTitle("Select Elements to Export")
         self.layout = QVBoxLayout()
@@ -451,11 +591,27 @@ class ElementSelectionDialog(QDialog):
         self.setLayout(self.layout)
 
     def get_selected_elements(self):
+        """
+        Retrieves the list of selected elements.
+
+        @return: A list of strings representing the names of selected elements.
+        """
         return [cb.text() for cb in self.checkboxes if cb.isChecked()]
 
-# Handles exporting device information with spaCy matching
 class Exporter:
+    """
+    Handles exporting device information to a spreadsheet.
+
+    Uses spaCy to match device information keys to spreadsheet columns and supports
+    exporting to CSV or Excel files.
+    """
+
     def __init__(self, config_manager):
+        """
+        Initializes the Exporter with a configuration manager and loads the spaCy model.
+
+        @param config_manager: ConfigManager instance for accessing the working directory.
+        """
         self.config_manager = config_manager
         try:
             self.nlp = spacy.load("en_core_web_lg")
@@ -467,6 +623,15 @@ class Exporter:
             self.nlp = None
 
     def export_device(self, device, parent_widget):
+        """
+        Exports selected device information to a spreadsheet file.
+
+        Prompts the user to select elements to export and a file location, then uses spaCy
+        to match keys to existing spreadsheet columns or creates new ones.
+
+        @param device: The device path to export information for.
+        @param parent_widget: The parent widget for displaying dialogs and status messages.
+        """
         if not self.nlp:
             parent_widget.statusBar().showMessage("spaCy model not available. Cannot export.", 5000)
             return
@@ -548,15 +713,34 @@ class Exporter:
             parent_widget.statusBar().showMessage(f"Error exporting: {e}", 5000)
 
 class DuplicateFinderThread(QThread):
+    """
+    A thread for finding duplicate files in a directory using MD5 hashing.
+
+    Runs in the background to compute file hashes and identify duplicates, emitting
+    progress and result signals.
+    """
     progress = pyqtSignal(int)
     finished = pyqtSignal(dict)
 
     def __init__(self, directory):
+        """
+        Initializes the thread with a directory to scan for duplicates.
+
+        @param directory: The directory path to scan for duplicate files.
+        """
         super().__init__()
         self.directory = directory
         self._result_all_hashes = {}  # Store all file hashes
 
     def md5(self, file_path):
+        """
+        Computes the MD5 hash of a file.
+
+        Reads the file in chunks to handle large files efficiently.
+
+        @param file_path: The path to the file to hash.
+        @return: A tuple containing the MD5 hash (string) and file path, or (None, file_path) if an error occurs.
+        """
         try:
             with open(file_path, 'rb') as f:
                 file_hash = hashlib.md5()
@@ -567,6 +751,12 @@ class DuplicateFinderThread(QThread):
             return None, file_path
 
     def run(self):
+        """
+        Executes the duplicate file search in the specified directory.
+
+        Scans all files, computes their MD5 hashes in parallel, and identifies duplicates.
+        Emits progress signals during processing and a finished signal with the duplicates dictionary.
+        """
         hashes = {}
         duplicates = {}
         file_paths = []
@@ -602,10 +792,28 @@ class DuplicateFinderThread(QThread):
 
         self.finished.emit(duplicates)
 
-# Handles finding duplicate files
 class DuplicateFinder:
+    """
+    Manages the process of finding and displaying duplicate files.
+
+    Provides a UI for selecting a directory, initiating a duplicate search, and displaying
+    results in a table. Supports filtering between duplicates and all files.
+    """
+
     def __init__(self, combo_box, dir_input, btn_browse, btn_find,
                  progress_bar, table_widget, filter_dropdown, parent_widget):
+        """
+        Initializes the DuplicateFinder with UI components.
+
+        @param combo_box: QComboBox for selecting devices.
+        @param dir_input: QLineEdit for entering or displaying the directory path.
+        @param btn_browse: QPushButton for browsing directories.
+        @param btn_find: QPushButton for initiating the duplicate search.
+        @param progress_bar: QProgressBar for showing scan progress.
+        @param table_widget: QTableWidget for displaying results.
+        @param filter_dropdown: QComboBox for filtering between duplicates and all files.
+        @param parent_widget: The parent widget (MainWindow) for accessing the status bar and config.
+        """
         self.combo_box = combo_box
         self.dir_input = dir_input
         self.btn_browse = btn_browse
@@ -626,7 +834,11 @@ class DuplicateFinder:
         self.apply_column_visibility()
 
     def apply_column_visibility(self):
-        """Apply saved column visibility settings"""
+        """
+        Applies saved column visibility settings to the duplicates table.
+
+        Uses configuration settings to show or hide columns in the table.
+        """
         if hasattr(self.parent_widget, 'config_manager'):
             columns_config = self.parent_widget.config_manager.get_duplicates_table_columns()
             
@@ -646,6 +858,11 @@ class DuplicateFinder:
                         self.table_widget.hideColumn(col_index)
 
     def browse_directory(self):
+        """
+        Opens a directory selection dialog initialized to the selected device's mountpoint.
+
+        Sets the selected directory in the dir_input field.
+        """
         device = self.combo_box.currentText()
         mountpoint = next((p.mountpoint for p in psutil.disk_partitions() if p.device == device), None)
         if mountpoint:
@@ -654,6 +871,11 @@ class DuplicateFinder:
                 self.dir_input.setText(directory)
 
     def find_duplicates(self):
+        """
+        Initiates a background thread to find duplicate files in the selected directory.
+
+        Disables the find button during processing and updates the progress bar.
+        """
         directory = self.dir_input.text() or next((p.mountpoint for p in psutil.disk_partitions() if p.device == self.combo_box.currentText()), None)
         if not directory or not os.path.exists(directory):
             self.parent_widget.statusBar().showMessage("Invalid directory selected.", 5000)
@@ -666,6 +888,13 @@ class DuplicateFinder:
         self.btn_find.setEnabled(False)
 
     def display_duplicates(self, duplicates):
+        """
+        Displays the results of the duplicate file search in the table widget.
+
+        Updates the table with duplicate files or all files based on the filter setting.
+
+        @param duplicates: A dictionary mapping MD5 hashes to lists of duplicate file paths.
+        """
         self.duplicates_only = duplicates
         self.all_file_hashes = {}  # key: hash, value: list of files
 
@@ -682,6 +911,11 @@ class DuplicateFinder:
         self.parent_widget.statusBar().showMessage("Duplicate search completed.", 5000)
 
     def update_table_display(self):
+        """
+        Updates the table widget to display either duplicate files or all files.
+
+        Populates the table based on the current filter setting in the dropdown.
+        """
         # Get current mode from the dropdown
         mode = self.filter_dropdown.currentText()
 
@@ -704,8 +938,17 @@ class DuplicateFinder:
             self.table_widget.setItem(i, 1, QTableWidgetItem(str(hash_value)))
             self.table_widget.setItem(i, 2, QTableWidgetItem(str(file_path)))
 
+    def copy_file(self, src_path, dst_path, buffer_size=1024*1024):
+        """
+        Copies a file from source to destination while preserving metadata.
 
-    def copy_file(src_path, dst_path, buffer_size=1024*1024):
+        Reads and writes in chunks to handle large files efficiently and preserves
+        access and modification times.
+
+        @param src_path: Source file path.
+        @param dst_path: Destination file path.
+        @param buffer_size: Size of the read/write buffer in bytes.
+        """
         # Read/write in chunks so you don't blow out memory on large files
         with open(src_path, "rb") as src, open(dst_path, "wb") as dst:
             while True:
@@ -719,6 +962,14 @@ class DuplicateFinder:
         os.utime(dst_path, (stat.st_atime, stat.st_mtime))
 
     def create_duplicate_folder(self, duplicates):
+        """
+        Creates a directory structure for duplicate files.
+
+        Organizes duplicates into subdirectories named by their MD5 hashes under a
+        'Duplicates' folder in the working directory.
+
+        @param duplicates: A dictionary mapping MD5 hashes to lists of duplicate file paths.
+        """
         base_dup_dir = os.path.join(self.parent_widget.config_manager.get_working_directory(),"Duplicates")
         os.makedirs(base_dup_dir, exist_ok=True)
 
@@ -733,9 +984,20 @@ class DuplicateFinder:
                 except Exception as e:
                     self.parent_widget.statusBar().showMessage(f"Error copying {file_path}: {e}", 5000)
 
-# Main application
 class MainWindow(QMainWindow):
+    """
+    The main application window.
+
+    Provides a tabbed interface for monitoring devices, viewing detailed information,
+    finding duplicates, and configuring settings.
+    """
+
     def __init__(self):
+        """
+        Initializes the main window with tabs and configuration manager.
+
+        Sets up the UI with a fixed size and initializes all tabs and components.
+        """
         super().__init__()
         self.setWindowTitle("Device Monitor App")
         self.setGeometry(100, 100, 659, 800) 
@@ -755,6 +1017,12 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self.apply_column_visibility)
 
     def init_tabs(self):
+        """
+        Initializes the tabs for the application.
+
+        Creates tabs for monitoring, file scanning, duplicates, and settings, and
+        initializes their respective UI components.
+        """
         self.tab_monitor = QWidget()
         self.tab_view = QWidget()
         #self.tab_export = QWidget()
@@ -776,6 +1044,11 @@ class MainWindow(QMainWindow):
         self.exporter = Exporter(self.config_manager)
 
     def init_monitor_tab(self):
+        """
+        Initializes the Monitor tab.
+
+        Sets up a table to display real-time device information and starts the DeviceMonitor.
+        """
         layout = QVBoxLayout()
         device_table = QTableWidget()
         device_table.setColumnCount(4)
@@ -793,6 +1066,12 @@ class MainWindow(QMainWindow):
         self.device_monitor.start_monitoring()
 
     def init_view_tab(self):
+        """
+        Initializes the File Scan tab.
+
+        Sets up a UI for selecting devices, scan methods, and directories, displaying
+        results, and exporting data.
+        """
         # Create main layout
         main_layout = QVBoxLayout()
         
@@ -860,7 +1139,6 @@ class MainWindow(QMainWindow):
                 if directory:
                     dir_input.setText(directory)
         
-        # This line was incorrectly placed inside the browse_directory function
         btn_browse_dir.clicked.connect(browse_directory)
         
         self.device_viewer = DeviceViewer(console_output, self.figure, self.canvas)
@@ -875,12 +1153,23 @@ class MainWindow(QMainWindow):
         btn_export.clicked.connect(lambda: self.exporter.export_device(device_combo.currentText(), self))
         
     def update_device_combo(self, combo_box):
+        """
+        Updates the device selection combo box with current partitions.
+
+        @param combo_box: QComboBox to populate with device paths.
+        """
         combo_box.clear()
         partitions = psutil.disk_partitions()
         for partition in partitions:
             combo_box.addItem(partition.device)
 
     def init_duplicates_tab(self):
+        """
+        Initializes the Duplicates tab.
+
+        Sets up a UI for selecting devices and directories, finding duplicates, and
+        displaying results in a table.
+        """
         layout = QVBoxLayout()
 
         # Top row: Device dropdown and filter dropdown
@@ -945,6 +1234,11 @@ class MainWindow(QMainWindow):
         self.duplicate_finder.create_duplicate_folder(self.duplicate_finder.duplicates_only)
 
     def init_settings_tab(self):
+        """
+        Initializes the Settings tab.
+
+        Sets up a UI for configuring the working directory and duplicates table column visibility.
+        """
         layout = QVBoxLayout()
     
         # Working Directory Section
@@ -981,7 +1275,11 @@ class MainWindow(QMainWindow):
         btn_set_directory.clicked.connect(lambda: self.set_working_directory(dir_label))
 
     def update_columns_settings(self):
-        """Update column visibility settings when checkboxes are toggled"""
+        """
+        Updates column visibility settings when checkboxes are toggled.
+
+        Saves the updated settings to the configuration.
+        """
         columns_config = {}
         for column_name, checkbox in self.column_checkboxes.items():
             columns_config[column_name] = checkbox.isChecked()
@@ -990,7 +1288,11 @@ class MainWindow(QMainWindow):
         self.apply_column_visibility()
 
     def apply_column_visibility(self):
-        """Apply column visibility to the duplicates table"""
+        """
+        Applies column visibility settings to the duplicates table.
+
+        Shows or hides table columns based on configuration settings.
+        """
         if hasattr(self, 'duplicate_finder') and self.duplicate_finder.table_widget:
             columns_config = self.config_manager.get_duplicates_table_columns()
             table = self.duplicate_finder.table_widget
@@ -1011,6 +1313,11 @@ class MainWindow(QMainWindow):
                         table.hideColumn(col_index)
 
     def set_working_directory(self, dir_label):
+        """
+        Sets the working directory via a dialog and updates the UI.
+
+        @param dir_label: QLabel to update with the new directory path.
+        """
         directory = QFileDialog.getExistingDirectory(self, "Select Working Directory")
         if directory:
             self.config_manager.set_working_directory(directory)

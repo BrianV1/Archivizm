@@ -64,7 +64,7 @@ class DeviceInfoCollector:
                 elif device_type == "Floppy":
                     device_info["Access Restrictions"] = "Floppy Drive"
                 elif device_type == "Zip Disk":
-                    device_info["Access Restrictions"] = "Zip Drive"
+                    device_info["Access Restrictions"] = "Zip Disk"
 
                 try:
                     usage = psutil.disk_usage(partition.mountpoint)
@@ -112,11 +112,24 @@ class DeviceInfoCollector:
                 scan_path = directory if directory else partition.mountpoint
                 if scan_path and os.path.exists(scan_path):
                     if use_siegfried:
-                        siegfried_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Siegfried', 'sf.exe')
-                        if not os.path.exists(siegfried_path):
-                            device_info["Siegfried Status"] = "Siegfried not found at expected location"
+                        # Determine Siegfried binary based on OS
+                        os_name = platform.system().lower()
+                        if os_name == 'windows':
+                            binary_name = 'sf.exe'
+                        elif os_name == 'linux' or os_name == 'darwin':  # Darwin is macOS
+                            binary_name = 'sf'
+                        else:
+                            device_info["Siegfried Status"] = f"Unsupported OS: {os_name}"
                             return device_info
-                        
+
+                        siegfried_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Siegfried', binary_name)
+                        if not os.path.exists(siegfried_path):
+                            device_info["Siegfried Status"] = f"Siegfried binary '{binary_name}' not found at {siegfried_path}"
+                            return device_info
+                        if not os.access(siegfried_path, os.X_OK):
+                            device_info["Siegfried Status"] = f"Siegfried binary '{binary_name}' at {siegfried_path} is not executable"
+                            return device_info
+
                         try:
                             # Collect up to 20000 file paths
                             max_files = 20000
@@ -160,6 +173,8 @@ class DeviceInfoCollector:
                                 if formats:
                                     device_info["Scanned Files"] = scanned_files
                                     device_info["File Formats"] = formats
+                            else:
+                                device_info["Siegfried Status"] = "No files found to scan"
                         except Exception as e:
                             device_info["Siegfried Exception"] = str(e)
                     else:
@@ -1334,3 +1349,4 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
+

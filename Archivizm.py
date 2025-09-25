@@ -961,28 +961,28 @@ class DuplicateFinder:
         stat = os.stat(src_path)
         os.utime(dst_path, (stat.st_atime, stat.st_mtime))
 
-    def create_duplicate_folder(self, duplicates):
-        """
-        Creates a directory structure for duplicate files.
+    # def create_duplicate_folder(self, duplicates):
+    #     """
+    #     Creates a directory structure for duplicate files.
 
-        Organizes duplicates into subdirectories named by their MD5 hashes under a
-        'Duplicates' folder in the working directory.
+    #     Organizes duplicates into subdirectories named by their MD5 hashes under a
+    #     'Duplicates' folder in the working directory.
 
-        @param duplicates: A dictionary mapping MD5 hashes to lists of duplicate file paths.
-        """
-        base_dup_dir = os.path.join(self.parent_widget.config_manager.get_working_directory(),"Duplicates")
-        os.makedirs(base_dup_dir, exist_ok=True)
+    #     @param duplicates: A dictionary mapping MD5 hashes to lists of duplicate file paths.
+    #     """
+    #     base_dup_dir = os.path.join(self.parent_widget.config_manager.get_working_directory(),"Duplicates")
+    #     os.makedirs(base_dup_dir, exist_ok=True)
 
-        for hash_value, files in duplicates.items():
-            hash_dir = os.path.join(base_dup_dir, hash_value)
-            os.makedirs(hash_dir, exist_ok=True)
+    #     for hash_value, files in duplicates.items():
+    #         hash_dir = os.path.join(base_dup_dir, hash_value)
+    #         os.makedirs(hash_dir, exist_ok=True)
 
-            for file_path in files:
-                try:
-                    dest = os.path.join(hash_dir, os.path.basename(file_path))
-                    self.copy_file(file_path, dest)
-                except Exception as e:
-                    self.parent_widget.statusBar().showMessage(f"Error copying {file_path}: {e}", 5000)
+    #         for file_path in files:
+    #             try:
+    #                 dest = os.path.join(hash_dir, os.path.basename(file_path))
+    #                 self.copy_file(file_path, dest)
+    #             except Exception as e:
+    #                 self.parent_widget.statusBar().showMessage(f"Error copying {file_path}: {e}", 5000)
 
 class MainWindow(QMainWindow):
     """
@@ -1231,7 +1231,7 @@ class MainWindow(QMainWindow):
             dupe_combo, dir_input, btn_browse_dir, btn_find_dupes,
             dupe_progress, dupe_table, filter_dropdown, self)
 
-        self.duplicate_finder.create_duplicate_folder(self.duplicate_finder.duplicates_only)
+        #self.duplicate_finder.create_duplicate_folder(self.duplicate_finder.duplicates_only)
 
     def init_settings_tab(self):
         """

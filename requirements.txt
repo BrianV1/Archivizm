@@ -1,3 +1,11 @@
-psutil
-rich
-questionary
+psutil==5.9.4
+pandas==1.5.3
+PyQt5==5.15.7
+matplotlib==3.5.3
+spacy==3.5.0
+numpy==1.23.5
+scipy==1.10.0
+scikit-learn==1.2.2
+python-dateutil==2.8.2
+pytz==2022.7
+pyinstaller==5.8.0

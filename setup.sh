@@ -66,35 +66,100 @@ get_os() {
 # Function to download and install Siegfried
 install_siegfried() {
     local OS=$1
-    echo "Downloading Siegfried for $OS..."
-    
+    local VERSION="v1.11.2"  # Latest stable version as of 2025-09-25
+    echo "Downloading Siegfried for $OS (v$VERSION)..."
+
+    # Determine download URL and extension
     case $OS in
         "Linux")
-            wget -O siegfried.tar.gz https://github.com/richardlehane/siegfried/releases/download/v1.10.0/sf-v1.10.0-linux-64bit.tar.gz
-            tar -xzf siegfried.tar.gz
-            mv sf-1.10.0/sf Siegfried/
-            mv sf-1.10.0/default.sig Siegfried/
-            rm -rf sf-1.10.0 siegfried.tar.gz
+            local URL="https://github.com/richardlehane/siegfried/releases/download/$VERSION/sf-$VERSION-linux-64bit.tar.gz"
+            local EXT="tar.gz"
+            local BINARY="sf"
             ;;
         "macOS")
-            wget -O siegfried.tar.gz https://github.com/richardlehane/siegfried/releases/download/v1.10.0/sf-v1.10.0-mac-64bit.tar.gz
-            tar -xzf siegfried.tar.gz
-            mv sf-1.10.0/sf Siegfried/
-            mv sf-1.10.0/default.sig Siegfried/
-            rm -rf sf-1.10.0 siegfried.tar.gz
+            local URL="https://github.com/richardlehane/siegfried/releases/download/$VERSION/sf-$VERSION-mac-64bit.tar.gz"
+            local EXT="tar.gz"
+            local BINARY="sf"
             ;;
         "Windows")
-            wget -O siegfried.zip https://github.com/richardlehane/siegfried/releases/download/v1.10.0/sf-v1.10.0-windows-64bit.zip
-            unzip -q siegfried.zip
-            mv sf-1.10.0/sf.exe Siegfried/
-            mv sf-1.10.0/default.sig Siegfried/
-            rm -rf sf-1.10.0 siegfried.zip
+            local URL="https://github.com/richardlehane/siegfried/releases/download/$VERSION/sf-$VERSION-windows-64bit.zip"
+            local EXT="zip"
+            local BINARY="sf.exe"
             ;;
         *)
             echo "Unsupported OS for automatic Siegfried installation"
             return 1
             ;;
     esac
+
+    # Create Siegfried directory if needed
+    mkdir -p Siegfried
+
+    # Download using curl (preferred) or fallback to wget
+    if command -v curl > /dev/null 2>&1; then
+        if ! curl -L -o siegfried.$EXT "$URL"; then
+            echo "Download failed with curl."
+            return 1
+        fi
+    elif command -v wget > /dev/null 2>&1; then
+        if ! wget -O siegfried.$EXT "$URL"; then
+            echo "Download failed with wget."
+            return 1
+        fi
+    else
+        echo "Neither curl nor wget found. Please install one to download Siegfried."
+        return 1
+    fi
+
+    # Extract
+    case $EXT in
+        "tar.gz")
+            if ! tar -xzf siegfried.$EXT; then
+                echo "Extraction failed."
+                rm -f siegfried.$EXT
+                return 1
+            fi
+            ;;
+        "zip")
+            if command -v unzip > /dev/null 2>&1; then
+                if ! unzip -q siegfried.$EXT; then
+                    echo "Extraction failed (unzip not available or failed)."
+                    rm -f siefried.$EXT
+                    return 1
+                fi
+            else
+                echo "unzip not found. Please install unzip for Windows support."
+                rm -f siegfried.$EXT
+                return 1
+            fi
+            ;;
+    esac
+
+    # Move binary and signature file (handles direct extraction to 'sf')
+    if [ -f "$BINARY" ]; then
+        mv "$BINARY" "Siegfried/"
+    else
+        echo "Binary $BINARY not found after extraction."
+        rm -rf siegfried.$EXT
+        return 1
+    fi
+
+    if [ -f "default.sig" ]; then
+        mv default.sig Siegfried/
+    else
+        echo "Warning: default.sig not found after extraction."
+    fi
+
+    # Clean up
+    rm -f siegfried.$EXT
+
+    # Make executable if on Unix-like system
+    if [ "$OS" != "Windows" ] && [ -f "Siegfried/$BINARY" ]; then
+        chmod +x "Siegfried/$BINARY"
+    fi
+
+    echo "Siegfried binary moved to Siegfried/$BINARY"
+    return 0
 }
 
 echo "================================"
@@ -148,25 +213,48 @@ source archivizm_env/bin/activate
 
 echo "Upgrading pip..."
 pip install --upgrade pip
+if [ $? -ne 0 ]; then
+    echo "❌ Error: Failed to upgrade pip!"
+    exit 1
+fi
 
 echo "Installing Python packages from requirements.txt..."
 if [ -f "requirements.txt" ]; then
     pip install -r requirements.txt
     if [ $? -ne 0 ]; then
-        echo "❌ Error: Failed to install requirements!"
-        exit 1
+        echo "❌ Error: Failed to install requirements! Attempting to install spacy separately..."
+        pip install spacy==3.5.0
+        if [ $? -ne 0 ]; then
+            echo "❌ Error: Failed to install spacy! Check your network or requirements.txt for conflicts."
+            exit 1
+        fi
     fi
 else
-    echo "❌ Error: requirements.txt not found!"
-    exit 1
+    echo "❌ Error: requirements.txt not found! Installing spacy directly..."
+    pip install spacy==3.5.0
+    if [ $? -ne 0 ]; then
+        echo "❌ Error: Failed to install spacy! Check your network or Python version."
+        exit 1
+    fi
 fi
 
 echo "Downloading spaCy English model..."
 python -m spacy download en_core_web_sm
-
 if [ $? -ne 0 ]; then
-    echo "⚠ Warning: Failed to download spaCy model"
-    echo "You can try manually: python -m spacy download en_core_web_sm"
+    echo "⚠ Warning: Failed to download spaCy model en_core_web_sm"
+    echo "Trying again with a clean environment..."
+    pip install spacy==3.5.0 --force-reinstall
+    python -m spacy download en_core_web_sm
+    if [ $? -ne 0 ]; then
+        echo "❌ Error: Failed to install spaCy model! Check your network or run manually:"
+        echo "    source archivizm_env/bin/activate"
+        echo "    python -m spacy download en_core_web_sm"
+        exit 1
+    else
+        echo "✅ spaCy model installed successfully on retry!"
+    fi
+else
+    echo "✅ spaCy model en_core_web_sm installed successfully!"
 fi
 
 echo "Checking Siegfried installation..."
@@ -181,27 +269,54 @@ if [ "$OS" = "Windows" ]; then
     SF_EXECUTABLE="Siegfried/sf.exe"
 fi
 
-if [ ! -f "$SF_EXECUTABLE" ] || [ ! -f "Siegfried/default.sig" ]; then
-    echo "Siegfried not found or incomplete. Installing..."
-    
-    if install_siegfried "$OS"; then
-        # Make executable if on Unix-like system
-        if [ "$OS" != "Windows" ] && [ -f "$SF_EXECUTABLE" ]; then
-            chmod +x "$SF_EXECUTABLE"
-        fi
+# First, check if system-wide Siegfried is available (fallback for Linux/macOS)
+if [ "$OS" != "Windows" ] && command -v sf > /dev/null 2>&1; then
+    echo "✅ System-wide Siegfried found: sf (in PATH)"
+    # Copy to local dir for consistency (optional, but ensures default.sig is local if needed)
+    if [ ! -f "$SF_EXECUTABLE" ]; then
+        cp "$(command -v sf)" "$SF_EXECUTABLE"
+        chmod +x "$SF_EXECUTABLE"
+    fi
+    SF_EXECUTABLE="sf"  # Use system one
+else
+    if [ ! -f "$SF_EXECUTABLE" ] || [ ! -f "Siegfried/default.sig" ]; then
+        echo "Siegfried not found or incomplete. Installing..."
         
-        if [ -f "$SF_EXECUTABLE" ] && [ -f "Siegfried/default.sig" ]; then
-            echo "✅ Siegfried installed successfully!"
+        if install_siegfried "$OS"; then
+            # Make executable if on Unix-like system
+            if [ "$OS" != "Windows" ] && [ -f "$SF_EXECUTABLE" ]; then
+                chmod +x "$SF_EXECUTABLE"
+            fi
+            
+            if [ -f "$SF_EXECUTABLE" ] && [ -f "Siegfried/default.sig" ]; then
+                echo "✅ Siegfried installed successfully!"
+            else
+                echo "⚠ Warning: Siegfried installation may have failed"
+            fi
         else
-            echo "⚠ Warning: Siegfried installation may have failed"
+            echo "⚠ Warning: Could not install Siegfried automatically"
+            echo "Please download manually from: https://github.com/richardlehane/siegfried/releases/tag/v1.11.2"
         fi
     else
-        echo "⚠ Warning: Could not install Siegfried automatically"
-        echo "Please download manually from: https://github.com/richardlehane/siegfried/releases"
+        echo "✅ Siegfried found: $SF_EXECUTABLE"
+        echo "✅ Siegfried signature file found: Siegfried/default.sig"
+    fi
+fi
+
+# Test Siegfried installation
+if [ -f "$SF_EXECUTABLE" ] || command -v sf > /dev/null 2>&1; then
+    local test_cmd="$SF_EXECUTABLE -version"
+    if [ "$OS" = "Windows" ]; then
+        test_cmd="Siegfried/sf.exe -version"
+    fi
+    echo "Testing Siegfried: $test_cmd"
+    if $test_cmd > /dev/null 2>&1; then
+        echo "✅ Siegfried test passed!"
+    else
+        echo "⚠ Warning: Siegfried binary exists but test failed (check permissions/path)"
     fi
 else
-    echo "✅ Siegfried found: $SF_EXECUTABLE"
-    echo "✅ Siegfried signature file found: Siegfried/default.sig"
+    echo "⚠ Warning: No valid Siegfried binary found"
 fi
 
 echo "Creating launcher script..."
